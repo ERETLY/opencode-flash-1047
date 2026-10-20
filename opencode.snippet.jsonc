@@ -1,0 +1,44 @@
+{
+  // Merge these two blocks into ~/.config/opencode/opencode.jsonc
+  // Keep everything that is already in your file.
+  "provider": {
+    "flash1047": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "flash 1047",
+      "options": {
+        "baseURL": "https://opencode.ai/inference/openai/v1",
+        "apiKey": "public"
+      },
+      "models": {
+        "deepseek-v4.1-flash-free": {
+          "name": "flash 1047 - Super Free",
+          "limit": { "context": 310000, "output": 32000 },
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "input": ["text", "image"],
+            "output": ["text"],
+            "temperature": true
+          },
+          "cost": { "input": 0, "output": 0 }
+        }
+      }
+    }
+  },
+  "plugins": [
+    {
+      "package": "./plugins/resilience",
+      "options": {
+        "onlyProviderID": "flash1047",
+        "onlyModelID": "deepseek-v4.1-flash-free",
+        "contextLimit": 310000,
+        "warn": 0.7,
+        "compact": 0.85,
+        "hard": 0.93,
+        "every": 20,
+        "stallMs": 900000,
+        "maxResumes": 4
+      }
+    }
+  ]
+}
