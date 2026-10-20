@@ -340,8 +340,16 @@ export default {
 
       if (CFG.protocol && !s.marks.protocol) {
         s.marks.protocol = true
-        event.system.push({ type: 'text', text: PROTOCOL })
-        log({ at: 'protocol', sessionID: event.sessionID, modelID: s.modelID })
+        // survive plugin reloads: never stack a second copy into the same session
+        const already = Array.isArray(event.system)
+          ? event.system.some((p: any) => p && typeof p.text === 'string' && p.text.includes('[omni-resilience] Long-session protocol'))
+          : false
+        if (!already) {
+          event.system.push({ type: 'text', text: PROTOCOL })
+          log({ at: 'protocol', sessionID: event.sessionID, modelID: s.modelID })
+        } else {
+          log({ at: 'protocol-skip', sessionID: event.sessionID, why: 'already-present' })
+        }
       }
 
       if (event.options && typeof event.options.maxTokens === 'number' && event.options.maxTokens > 32000) {
