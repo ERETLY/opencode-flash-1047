@@ -84,8 +84,9 @@ as a step-by-step procedure for an agent with file access.
   execution start/finish, and around compactions.
 - **Retry policy** – 429/408/409/425/5xx/transport errors retried with backoff. A stream that
   dies mid-flight (`provider.transport` / `ECONNRESET`, HTTP 200 already received) is retried
-  fast (3s, 6s, 9s ... capped at 15s) at most 5 times, because the free gateway will not heal a
-  connection reset by waiting longer; after that the turn fails and resume/compaction take over.
+  fast (3s, 6s, 9s ... capped at 15s); after 5 transport failures the plugin stops extending the
+  retry window instead of hanging for minutes. The plugin also force-prunes stale tool output on
+  the second reset, since a huge request is the usual reason the gateway drops the stream.
 - **Auto-resume** – after retries are exhausted (and the error is not auth/model-fatal) the
   session is resumed with a "continue where you left off" prompt, max 4 times per user message.
 - **Stall detection** – no provider event for 15 minutes while the server still reports the

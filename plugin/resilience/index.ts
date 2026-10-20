@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 const CHARS_PER_TOKEN = 3.6
+const PLUGIN_ID = 'omni-resilience'
 
 const DEFAULTS = {
   contextLimit: 310000,
@@ -65,7 +66,7 @@ const headTail = (s: string, head: number, tail: number) => {
 }
 
 export default {
-  id: 'omni-resilience',
+  id: PLUGIN_ID,
   async setup(ctx: any) {
     const root = ctx.location?.directory || process.cwd()
     const opts = ctx.options ?? {}
@@ -90,8 +91,9 @@ export default {
     const ours = (s: any) => (!ONLY || s?.modelID === ONLY) && (!ONLY_P || s?.providerID === ONLY_P)
 
     const reg: Map<string, any> = GLOBAL.__omniResilience.byRoot
-    if (!reg.has(root)) reg.set(root, { states: new Map<string, any>(), timerStarted: false, subscribed: false })
-    const shared = reg.get(root)
+    const regKey = `${root}::${PLUGIN_ID}`
+    if (!reg.has(regKey)) reg.set(regKey, { states: new Map<string, any>(), timerStarted: false, subscribed: false })
+    const shared = reg.get(regKey)
     const state: Map<string, any> = shared.states
 
     const logs = path.join(root, '.omo', 'logs')
@@ -215,26 +217,57 @@ export default {
       }
     }
 
-    // true only when the last message is not a finished assistant answer
+    // true only when the last user turn never reached an idle/completed state
     const needsContinuation = async (sessionID: string) => {
       try {
         const res: any = await ctx.session.context({ sessionID })
         const msgs = res?.messages ?? res?.data ?? res
         if (!Array.isArray(msgs) || !msgs.length) return false
         const last = msgs[msgs.length - 1]
-        const role = String(last?.role || '')
-        if (role === 'assistant') {
+        const t = String(last?.type || last?.role || '')
+        // 'idle' means the platform closed the turn (succeeded, failed or interrupted on purpose)
+        if (t === 'idle') return false
+        if (t === 'user' || t === 'tool') return true
+        if (t === 'assistant') {
           const parts = Array.isArray(last.content) ? last.content : []
-          const hasTool = parts.some((p: any) => p && (p.type === 'tool-call' || p.type === 'tool'))
-          return hasTool
+          const hasTool = parts.some((p: any) => p && (p.type === 'tool-call' || p.type === 'tool' || p.type === 'tool-invocation'))
+          const hasText = parts.some((p: any) => p && p.type === 'text' && String(p.text || '').trim().length > 0)
+          // unfinished tool call, or an assistant message that produced nothing at all
+          return hasTool || !hasText
         }
-        return role === 'user' || role === 'tool'
+        return false
       } catch {
         return false
       }
     }
 
-    const resume = async (sessionID: string, reason: string) => {
+    // did the model already produce visible prose after the last user message?
+    const answerSinceUser = async (sessionID: string) => {
+      try {
+        const res: any = await ctx.session.context({ sessionID })
+        const msgs = res?.messages ?? res?.data ?? res
+        if (!Array.isArray(msgs)) return false
+        let at = -1
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          if (String(msgs[i]?.type || msgs[i]?.role || '') === 'user') {
+            at = i
+            break
+          }
+        }
+        if (at < 0) return false
+        for (let i = at + 1; i < msgs.length; i++) {
+          const m = msgs[i]
+          if (String(m?.type || m?.role || '') !== 'assistant') continue
+          const parts = Array.isArray(m.content) ? m.content : []
+          if (parts.some((p: any) => p && p.type === 'text' && String(p.text || '').trim().length > 0)) return true
+        }
+        return false
+      } catch {
+        return false
+      }
+    }
+
+    const resume = async (sessionID: string, reason: string, force = false) => {
       const s = get(sessionID)
       if (!ours(s)) return
       if (s.resumes >= CFG.maxResumes) {
@@ -243,11 +276,19 @@ export default {
       }
       if (Date.now() - s.lastResumeAt < CFG.resumeCooldownMs) return
       const state = await sessionState(sessionID)
-      if (state.running) {
+      if (state.running && !force) {
         log({ at: 'resume-skip', sessionID, why: 'still-running', reason })
         return
       }
-      if (!(await needsContinuation(sessionID))) {
+      if (force) {
+        // our own stall interrupt produces an 'interrupted' idle message: that is not an answer
+        if (await answerSinceUser(sessionID)) {
+          log({ at: 'resume-skip', sessionID, why: 'answer-present', reason, outcome: state.outcome })
+          s.inflight = false
+          s.stalled = false
+          return
+        }
+      } else if (!(await needsContinuation(sessionID))) {
         log({ at: 'resume-skip', sessionID, why: 'no-open-turn', reason, outcome: state.outcome })
         s.inflight = false
         s.stalled = false
@@ -453,7 +494,9 @@ export default {
       const status = event.error?.status
       const type = String(event.error?.type || '')
       const msg = String(event.error?.message || '')
-      const transport = /transport|econnreset|connection lost|socket|terminated|aborted|premature/i.test(type + ' ' + msg)
+      // our own stall interrupt is not a network failure - never retry it
+      if (/step interrupted|request aborted by user|interrupted by user/i.test(msg)) return
+      const transport = /transport|econnreset|connection lost|socket|premature|network error|fetch failed/i.test(type + ' ' + msg)
       const transient =
         transport ||
         status === 429 ||
@@ -538,13 +581,10 @@ export default {
               s.inflight = false
             } else if (type === 'session.step.failed') {
               if (d.error) {
-                const msg = String(d.error?.message || '')
-                s.lastError = String(d.error?.type || msg || s.lastError)
-                if (/transport|econnreset|connection lost|socket|terminated|aborted/i.test(msg + ' ' + s.lastError)) {
-                  s.transportFails = (s.transportFails || 0) + 1
-                  if (s.transportFails >= 2) s.forcePrune = true
-                  log({ at: 'transport-fail', sessionID: id, count: s.transportFails, error: msg.slice(0, 160) })
-                }
+                const et = String(d.error?.type || '')
+                const em = String(d.error?.message || '')
+                s.lastError = et || em || s.lastError
+                // counting/retry decisions live in the retry hook, which sees every attempt exactly once
               }
             } else if (type === 'session.status') {
               const st = String(d.status?.type || d.status || '')
@@ -629,12 +669,9 @@ export default {
                 s.stalled = false
                 continue
               }
-              const open = await needsContinuation(id)
-              if (open) void resume(id, 'stream stall')
-              else {
-                s.inflight = false
-                log({ at: 'stall-skip', sessionID: id, why: 'answer-present' })
-              }
+              // the interrupt itself closes the turn as 'interrupted', so resume() checks
+              // for real assistant prose instead of the idle marker
+              void resume(id, 'stream stall', true)
             }
           } catch (e: any) {
             log({ at: 'timer-error', error: String(e?.message || e) })
