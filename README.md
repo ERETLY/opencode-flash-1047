@@ -82,11 +82,13 @@ as a step-by-step procedure for an agent with file access.
   into the compaction request so the summary keeps operational state.
 - **Checkpoints** – writes `.omo/checkpoints/<session>.json` every 20 tool calls, on
   execution start/finish, and around compactions.
-- **Retry policy** – 429/408/409/425/5xx/transport errors retried with backoff. A stream that
-  dies mid-flight (`provider.transport` / `ECONNRESET`, HTTP 200 already received) is retried
-  fast (3s, 6s, 9s ... capped at 15s); after 5 transport failures the plugin stops extending the
-  retry window instead of hanging for minutes. The plugin also force-prunes stale tool output on
-  the second reset, since a huge request is the usual reason the gateway drops the stream.
+- **Retry policy** – 429/408/409/425/5xx/transport errors retried with backoff. A 5xx such as
+  `Upstream request failed: Endpoint is unavailable` is retried fast (1s, 2s, 4s, capped at 5s),
+  a stream that dies mid-flight (`provider.transport` / `ECONNRESET`, HTTP 200 already received)
+  at 1.5s, 3s, 4.5s ... capped at 8s, and only 429/rate-limit gets the long 5s -> 60s backoff.
+  After 5 transport failures the plugin stops extending the retry window instead of hanging for
+  minutes. It also force-prunes stale tool output on the second reset, since a huge request is
+  the usual reason the gateway drops the stream.
 - **Auto-resume** – after retries are exhausted (and the error is not auth/model-fatal) the
   session is resumed with a "continue where you left off" prompt, max 4 times per user message.
 - **Stall detection** – no provider event for 15 minutes while the server still reports the
@@ -108,7 +110,8 @@ The plugin never touches your other models: it exits immediately unless
 | oversized payload | 264K + 308K token payloads compacted automatically, secret retained |
 | compaction chain | 3 consecutive compactions, secret retained, all `completed` |
 | retry hook | 429 mock: 10 s -> 20 s -> 40 s backoff |
-| transport retry | socket reset mid-stream: detected, retried 3s/6s/9s, gives up after 5 |
+| transport retry | socket reset mid-stream: detected, retried 1.5s/3s/4.5s, gives up after 5 |
+| 503 retry | two `Endpoint is unavailable` answers: recovered in 4.5s end-to-end |
 | auto-resume | fired after 3 retries, suppressed on hard 400 |
 | resume guard | failed turn that already produced an answer -> no resume prompt |
 | stall detector | verified against session state; hanging provider -> interrupt + resume |

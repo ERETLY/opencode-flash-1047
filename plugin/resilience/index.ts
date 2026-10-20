@@ -518,9 +518,16 @@ export default {
         }
       }
       const attempt = Number(event.attempt || 1)
-      const delay = transport ? Math.min(15000, 3000 * attempt) : Math.min(120000, 5000 * Math.pow(2, Math.max(0, attempt - 1)))
+      const isRate = status === 429 || /rate.?limit|too many requests|quota/i.test(type + ' ' + msg)
+      // 5xx / "endpoint unavailable" is usually a short upstream hiccup: retry fast (1s, 2s, 4s)
+      // instead of making the user stare at a 30 s backoff.
+      const delay = transport
+        ? Math.min(8000, 1500 * attempt)
+        : isRate
+          ? Math.min(60000, 5000 * Math.pow(2, Math.max(0, attempt - 1)))
+          : Math.min(5000, 1000 * Math.pow(2, Math.max(0, attempt - 2)))
       event.decision = { retry: true, delay }
-      log({ at: 'retry', sessionID: event.sessionID, status, type, attempt, delay, transport })
+      log({ at: 'retry', sessionID: event.sessionID, status, type, attempt, delay, transport, isRate })
     })
 
     try {
