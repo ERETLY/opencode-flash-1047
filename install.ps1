@@ -1,6 +1,9 @@
+param(
+  [string]$ConfigDir = ''
+)
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
-$cfgDir = Join-Path $HOME '.config\opencode'
+$cfgDir = if ($ConfigDir) { $ConfigDir } else { Join-Path $HOME '.config\opencode' }
 
 Write-Host 'flash 1047 installer' -ForegroundColor Cyan
 Write-Host "config dir: $cfgDir"
@@ -26,11 +29,12 @@ function ConvertFrom-Jsonc([string]$text) {
   return $t | ConvertFrom-Json
 }
 
+$utf8 = New-Object System.Text.UTF8Encoding($false)
 if (-not $cfgFile) {
   New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
   $cfgFile = Join-Path $cfgDir 'opencode.json'
-  $seed = @{ '$schema' = 'https://opencode.ai/config.json' }
-  $seed | ConvertTo-Json -Depth 20 | Set-Content -Path $cfgFile -Encoding UTF8
+  $seed = @{ '$schema' = 'https://opencode.ai/config.json' } | ConvertTo-Json -Depth 20
+  [System.IO.File]::WriteAllText($cfgFile, $seed, $utf8)
   Write-Host "config  -> $cfgFile (new)" -ForegroundColor Green
 }
 
@@ -91,7 +95,7 @@ $cfg | Add-Member -NotePropertyName plugins -NotePropertyValue $kept -Force
 
 $backup = "$cfgFile.bak." + (Get-Date -Format 'yyyyMMdd-HHmmss')
 Copy-Item $cfgFile $backup
-$cfg | ConvertTo-Json -Depth 30 | Set-Content -Path $cfgFile -Encoding UTF8
+$cfg | ConvertTo-Json -Depth 30 | ForEach-Object { [System.IO.File]::WriteAllText($cfgFile, $_, $utf8) }
 Write-Host "config  -> $cfgFile" -ForegroundColor Green
 Write-Host "backup  -> $backup"
 

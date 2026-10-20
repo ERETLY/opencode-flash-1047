@@ -35,7 +35,7 @@ if command -v python3 >/dev/null 2>&1; then
 import json, os, re, shutil, datetime
 
 cfg_path = os.environ['CFG']
-raw = open(cfg_path, encoding='utf-8').read()
+raw = open(cfg_path, encoding='utf-8-sig').read()
 
 def strip(s):
     out, i, n = [], 0, len(s)

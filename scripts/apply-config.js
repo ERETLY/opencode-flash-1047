@@ -6,8 +6,12 @@ const path = require('path')
 const os = require('os')
 
 const DRY = process.argv.includes('--dry-run')
+const dirArg = (() => {
+  const i = process.argv.indexOf('--dir')
+  return i > -1 ? process.argv[i + 1] : ''
+})()
 const root = path.resolve(__dirname, '..')
-const cfgDir = path.join(os.homedir(), '.config', 'opencode')
+const cfgDir = dirArg ? path.resolve(dirArg) : path.join(os.homedir(), '.config', 'opencode')
 
 const PROVIDER = {
   npm: '@ai-sdk/openai-compatible',
@@ -115,7 +119,7 @@ function copyPlugin() {
 }
 
 function mergeConfig(file) {
-  const raw = fs.readFileSync(file, 'utf8')
+  const raw = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')
   let cfg
   try {
     cfg = JSON.parse(raw)

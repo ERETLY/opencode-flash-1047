@@ -45,6 +45,18 @@ Measured on the live free endpoint: 319 123 tokens accepted, 325 760 rejected wi
 No Node.js is needed for the manual path; the installers only use it when it happens to be
 available and fall back to printing the exact steps otherwise.
 
+Custom config location:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -ConfigDir "D:\tools\opencode"
+```
+
+```bash
+node scripts/apply-config.js --dir "D:\tools\opencode"   # cross-platform merge
+```
+
+`install.sh` honours `XDG_CONFIG_HOME` as well as `$HOME`.
+
 ## Install (AI assistant)
 
 Point your assistant at `INSTALL.md` and say: *"install this model"*. That file is written
@@ -70,6 +82,19 @@ as a step-by-step procedure for an agent with file access.
 
 The plugin never touches your other models: it exits immediately unless
 `providerID === "flash1047"`.
+
+## Verified on 2.0.32
+
+| test | result |
+|---|---|
+| model list | `flash1047/deepseek-v4.1-flash-free` + `opencode/deepseek-v4.1-flash-free` |
+| single request, new provider | 165 504 input tokens, answer correct, 6.2 s |
+| oversized payload | 264K + 308K token payloads compacted automatically, secret retained |
+| compaction chain | 3 consecutive compactions, secret retained, all `completed` |
+| retry hook | 429 mock: 10 s -> 20 s -> 40 s backoff |
+| auto-resume | fired after 3 retries, suppressed on hard 400 |
+| stall detector | interrupt + resume on a hanging provider |
+| scoping | plugin log lines for the new provider only, zero for the original |
 
 ## Files
 
