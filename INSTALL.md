@@ -55,7 +55,13 @@ top-level `plugins` array. Keep everything that is already in the file.
             "output": ["text"],
             "temperature": true
           },
-          "cost": { "input": 0, "output": 0 }
+          "cost": { "input": 0, "output": 0 },
+          "variants": {
+            "low": { "reasoningEffort": "low" },
+            "medium": { "reasoningEffort": "medium" },
+            "high": { "reasoningEffort": "high" },
+            "max": { "reasoningEffort": "max" }
+          }
         }
       }
     }
@@ -72,7 +78,8 @@ top-level `plugins` array. Keep everything that is already in the file.
         "hard": 0.93,
         "every": 20,
         "stallMs": 900000,
-        "maxResumes": 4
+        "maxResumes": 4,
+        "resumeCooldownMs": 120000
       }
     }
   ]

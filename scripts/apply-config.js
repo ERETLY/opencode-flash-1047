@@ -32,6 +32,12 @@ const PROVIDER = {
         temperature: true,
       },
       cost: { input: 0, output: 0 },
+      variants: {
+        low: { reasoningEffort: 'low' },
+        medium: { reasoningEffort: 'medium' },
+        high: { reasoningEffort: 'high' },
+        max: { reasoningEffort: 'max' },
+      },
     },
   },
 }
@@ -48,6 +54,7 @@ const PLUGIN = {
     every: 20,
     stallMs: 900000,
     maxResumes: 4,
+    resumeCooldownMs: 120000,
   },
 }
 

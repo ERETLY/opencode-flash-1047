@@ -76,6 +76,12 @@ cfg.setdefault('provider', {})['flash1047'] = {
                 'input': ['text', 'image'], 'output': ['text'], 'temperature': True,
             },
             'cost': {'input': 0, 'output': 0},
+            'variants': {
+                'low': {'reasoningEffort': 'low'},
+                'medium': {'reasoningEffort': 'medium'},
+                'high': {'reasoningEffort': 'high'},
+                'max': {'reasoningEffort': 'max'},
+            },
         }
     },
 }
@@ -90,7 +96,7 @@ plugins.append({
         'onlyModelID': 'deepseek-v4.1-flash-free',
         'contextLimit': 310000,
         'warn': 0.7, 'compact': 0.85, 'hard': 0.93,
-        'every': 20, 'stallMs': 900000, 'maxResumes': 4,
+        'every': 20, 'stallMs': 900000, 'maxResumes': 4, 'resumeCooldownMs': 120000,
     },
 })
 cfg['plugins'] = plugins

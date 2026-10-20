@@ -19,10 +19,20 @@ exactly as before. The plugin is scoped to the new provider only.
 | context | 200 000 (metadata) | **310 000** (measured safe) |
 | output | 32 000 | 32 000 |
 | cost | $0 | **$0** |
+| reasoning effort | low / high / max | **low / medium / high / max** |
 | resilience plugin | no | **yes** |
 
 Measured on the live free endpoint: 319 123 tokens accepted, 325 760 rejected with
 `400 context_length_exceeded`. 310 000 leaves headroom for tool schemas and the reply.
+
+## Reasoning effort
+
+The model entry declares `low`, `medium`, `high` and `max` variants. Pick one in the model
+picker (or in the session's model settings); the plugin does not touch it. Verified on 2.0.32:
+selecting `max` sends `"reasoning_effort": "max"` in the request body to the gateway.
+
+If a variant is missing from the picker, the `variants` object is missing from the model entry —
+restart OpenCode after adding it.
 
 ## Install (human)
 
@@ -72,11 +82,16 @@ as a step-by-step procedure for an agent with file access.
   into the compaction request so the summary keeps operational state.
 - **Checkpoints** – writes `.omo/checkpoints/<session>.json` every 20 tool calls, on
   execution start/finish, and around compactions.
-- **Retry policy** – 429/408/409/425/5xx/transport errors retried with 5s -> 120s backoff.
+- **Retry policy** – 429/408/409/425/5xx/transport errors retried with backoff. A stream that
+  dies mid-flight (`provider.transport` / `ECONNRESET`, HTTP 200 already received) is retried
+  fast (3s, 6s, 9s ... capped at 15s) at most 5 times, because the free gateway will not heal a
+  connection reset by waiting longer; after that the turn fails and resume/compaction take over.
 - **Auto-resume** – after retries are exhausted (and the error is not auth/model-fatal) the
-  session is resumed with a "continue where you left off" prompt, max 4 times.
-- **Stall detection** – no provider event for 15 minutes with no pending tools -> interrupt
-  and resume.
+  session is resumed with a "continue where you left off" prompt, max 4 times per user message.
+- **Stall detection** – no provider event for 15 minutes while the server still reports the
+  session as running, no pending tools and no finished assistant answer -> interrupt, then
+  resume. Every check is verified against the real session state first, so an idle session can
+  never be woken up by a stale timer.
 - **Long-session protocol** – one system block per session: keep `.omo/state.md`, grep large
   files instead of reading them whole, process bulk data with scripts, survive compaction.
 
@@ -92,8 +107,11 @@ The plugin never touches your other models: it exits immediately unless
 | oversized payload | 264K + 308K token payloads compacted automatically, secret retained |
 | compaction chain | 3 consecutive compactions, secret retained, all `completed` |
 | retry hook | 429 mock: 10 s -> 20 s -> 40 s backoff |
+| transport retry | socket reset mid-stream: detected, retried 3s/6s/9s, gives up after 5 |
 | auto-resume | fired after 3 retries, suppressed on hard 400 |
-| stall detector | interrupt + resume on a hanging provider |
+| resume guard | failed turn that already produced an answer -> no resume prompt |
+| stall detector | verified against session state; hanging provider -> interrupt + resume |
+| reasoning variants | `low/medium/high/max` exposed, `reasoning_effort` sent on the wire |
 | scoping | plugin log lines for the new provider only, zero for the original |
 
 ## Files
@@ -123,5 +141,12 @@ to buy or leak.
 - **No plugin activity** – look for `setup` in `.omo/logs/resilience.jsonl` inside your
   project directory. If it is absent, the plugin path is wrong: it must be
   `~/.config/opencode/plugins/resilience/index.ts` (a directory containing `index.ts`).
+- **`Connection lost while reading the response: ECONNRESET`** – the free gateway closed the
+  stream after HTTP 200. It is upstream, not your machine and not the config; it happens on the
+  paid DeepSeek entries too. The plugin retries transport failures up to 5 times, force-prunes
+  stale tool output on the second one, and then lets the turn fail instead of hanging.
+- **Resume prompt keeps appearing** – that only happens when a turn really ended with no answer.
+  If you see it on a finished turn, check `.omo/logs/resilience.jsonl` for `stall` /
+  `stall-skip` / `resume-skip` lines and update to the current plugin version.
 - **Want the original back** – delete the `flash1047` provider block and the `resilience`
   plugin entry; nothing else was modified.

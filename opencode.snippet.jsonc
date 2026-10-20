@@ -20,7 +20,14 @@
             "output": ["text"],
             "temperature": true
           },
-          "cost": { "input": 0, "output": 0 }
+          "cost": { "input": 0, "output": 0 },
+          // reasoning effort selector in the model picker: low / medium / high / max
+          "variants": {
+            "low": { "reasoningEffort": "low" },
+            "medium": { "reasoningEffort": "medium" },
+            "high": { "reasoningEffort": "high" },
+            "max": { "reasoningEffort": "max" }
+          }
         }
       }
     }
@@ -37,7 +44,8 @@
         "hard": 0.93,
         "every": 20,
         "stallMs": 900000,
-        "maxResumes": 4
+        "maxResumes": 4,
+        "resumeCooldownMs": 120000
       }
     }
   ]

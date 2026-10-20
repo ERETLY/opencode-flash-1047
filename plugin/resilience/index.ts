@@ -12,6 +12,7 @@ const DEFAULTS = {
   cooldownMs: 180000,
   stallMs: 900000,
   maxResumes: 4,
+  resumeCooldownMs: 120000,
   keepRecent: 12,
   pruneSoft: 0.55,
   protocol: true,
@@ -24,9 +25,10 @@ Large files/logs: anything over ~50 KB or ~1000 lines is never read whole more t
 Context pressure: above ~70% stop exploratory reads and summarise into .omo/state.md; above ~85% finish the current step, write state, let compaction run, do not start a new sub-task. Prefer subagents for wide fan-out (many hosts/files) with narrow self-contained instructions.
 Quality: verify against files or fresh tool output, never invent paths/results/output. On tool failure read the error, adjust, retry once; after two failures change method and record why.`
 
-// setup() runs once per location; all copies must share per-session state
-const state = new Map<string, any>()
-let timerStarted = false
+// setup() runs once per location; several instances may load for the same root,
+// so state, the event subscription and the stall timer are shared per root.
+const GLOBAL: any = globalThis as any
+GLOBAL.__omniResilience ||= { byRoot: new Map<string, any>() }
 
 const estimate = (v: any): number => {
   let chars = 0
@@ -76,6 +78,7 @@ export default {
       cooldownMs: Number(opts.cooldownMs ?? DEFAULTS.cooldownMs),
       stallMs: Number(opts.stallMs ?? DEFAULTS.stallMs),
       maxResumes: Number(opts.maxResumes ?? DEFAULTS.maxResumes),
+      resumeCooldownMs: Number(opts.resumeCooldownMs ?? DEFAULTS.resumeCooldownMs),
       keepRecent: Number(opts.keepRecent ?? DEFAULTS.keepRecent),
       pruneSoft: Number(opts.pruneSoft ?? DEFAULTS.pruneSoft),
       protocol: opts.protocol === undefined ? DEFAULTS.protocol : Boolean(opts.protocol),
@@ -84,10 +87,12 @@ export default {
     // empty = plugin active for every model; set them to guard a single model/provider
     const ONLY = String(opts.onlyModelID ?? '').trim()
     const ONLY_P = String(opts.onlyProviderID ?? '').trim()
-    const ours = (s: any) =>
-      (!ONLY || s?.modelID === ONLY) && (!ONLY_P || s?.providerID === ONLY_P)
-    const isOursID = (id: any) => !ONLY || String(id || '') === ONLY
-    void isOursID
+    const ours = (s: any) => (!ONLY || s?.modelID === ONLY) && (!ONLY_P || s?.providerID === ONLY_P)
+
+    const reg: Map<string, any> = GLOBAL.__omniResilience.byRoot
+    if (!reg.has(root)) reg.set(root, { states: new Map<string, any>(), timerStarted: false, subscribed: false })
+    const shared = reg.get(root)
+    const state: Map<string, any> = shared.states
 
     const logs = path.join(root, '.omo', 'logs')
     const ckptDir = path.join(root, '.omo', 'checkpoints')
@@ -117,6 +122,9 @@ export default {
           lastResumeAt: 0,
           busy: false,
           stalled: false,
+          inflight: false,
+          transportFails: 0,
+          forcePrune: false,
           prunedChars: 0,
           modelLookup: 0,
         })
@@ -193,6 +201,39 @@ export default {
       }
     }
 
+    // actual runtime state according to the server, not our event bookkeeping
+    const sessionState = async (sessionID: string) => {
+      try {
+        const info: any = await ctx.session.get({ sessionID })
+        const raw = info?.status?.type ?? info?.status ?? info?.data?.status?.type ?? info?.data?.status
+        const status = typeof raw === 'string' ? raw : ''
+        const outcome = String(info?.outcome ?? info?.data?.outcome ?? '')
+        const running = status ? /running|busy|retry|streaming/i.test(status) : !/succeeded|failed|interrupted/i.test(outcome)
+        return { running, status, outcome }
+      } catch {
+        return { running: false, status: '', outcome: '' }
+      }
+    }
+
+    // true only when the last message is not a finished assistant answer
+    const needsContinuation = async (sessionID: string) => {
+      try {
+        const res: any = await ctx.session.context({ sessionID })
+        const msgs = res?.messages ?? res?.data ?? res
+        if (!Array.isArray(msgs) || !msgs.length) return false
+        const last = msgs[msgs.length - 1]
+        const role = String(last?.role || '')
+        if (role === 'assistant') {
+          const parts = Array.isArray(last.content) ? last.content : []
+          const hasTool = parts.some((p: any) => p && (p.type === 'tool-call' || p.type === 'tool'))
+          return hasTool
+        }
+        return role === 'user' || role === 'tool'
+      } catch {
+        return false
+      }
+    }
+
     const resume = async (sessionID: string, reason: string) => {
       const s = get(sessionID)
       if (!ours(s)) return
@@ -200,7 +241,18 @@ export default {
         log({ at: 'resume-capped', sessionID, resumes: s.resumes })
         return
       }
-      if (Date.now() - s.lastResumeAt < 30000) return
+      if (Date.now() - s.lastResumeAt < CFG.resumeCooldownMs) return
+      const state = await sessionState(sessionID)
+      if (state.running) {
+        log({ at: 'resume-skip', sessionID, why: 'still-running', reason })
+        return
+      }
+      if (!(await needsContinuation(sessionID))) {
+        log({ at: 'resume-skip', sessionID, why: 'no-open-turn', reason, outcome: state.outcome })
+        s.inflight = false
+        s.stalled = false
+        return
+      }
       s.resumes += 1
       s.lastResumeAt = Date.now()
       s.stalled = false
@@ -224,8 +276,14 @@ export default {
       const s = get(event.sessionID)
       if (!ours(s)) return
       const text = event.prompt?.text || ''
-      // ignore our own resume messages
-      if (!text.startsWith('The previous turn stopped unexpectedly')) s.lastPrompt = text
+      // ignore our own resume messages; a real user message opens a new turn budget
+      if (!text.startsWith('The previous turn stopped unexpectedly')) {
+        s.lastPrompt = text
+        s.resumes = 0
+        s.lastResumeAt = 0
+        s.transportFails = 0
+        s.forcePrune = false
+      }
       log({ at: 'prompt', sessionID: event.sessionID, chars: text.length })
     })
 
@@ -264,7 +322,8 @@ export default {
       }
 
       // ---- adaptive pruning of stale tool output (outgoing request only) ----
-      if (ratio >= CFG.pruneSoft && Array.isArray(event.messages)) {
+      const forced = Boolean(s.forcePrune)
+      if ((forced || ratio >= CFG.pruneSoft) && Array.isArray(event.messages)) {
         try {
           const firstTool = event.messages.find((m: any) => m?.role === 'tool')
           log({
@@ -278,9 +337,10 @@ export default {
           })
         } catch {}
         try {
-        const keep = ratio >= CFG.compact ? 6 : CFG.keepRecent
-        const head = ratio >= CFG.compact ? 2000 : ratio >= CFG.warn ? 3000 : 4000
-        const tail = ratio >= CFG.compact ? 600 : 1200
+        const tight = forced || ratio >= CFG.compact
+        const keep = tight ? 6 : CFG.keepRecent
+        const head = tight ? 2000 : ratio >= CFG.warn ? 3000 : 4000
+        const tail = tight ? 600 : 1200
         const stop = Math.max(0, event.messages.length - keep)
         let saved = 0
         let touched = 0
@@ -303,9 +363,13 @@ export default {
         }
         if (saved > 0) {
           s.prunedChars += saved
-          log({ at: 'prune', sessionID: event.sessionID, ratio: Number(ratio.toFixed(3)), messages: touched, saved })
+          log({ at: 'prune', sessionID: event.sessionID, ratio: Number(ratio.toFixed(3)), messages: touched, saved, forced })
           used = estimate(event.messages) + estimate(event.system)
           ratio = used / CFG.limit
+        }
+        if (forced) {
+          s.forcePrune = false
+          log({ at: 'force-prune-done', sessionID: event.sessionID, saved })
         }
         } catch (e: any) {
           log({ at: 'prune-error', sessionID: event.sessionID, error: String(e?.message || e) })
@@ -388,22 +452,38 @@ export default {
       log({ at: 'retry-hook', sessionID: event.sessionID, status: event.error?.status, type: event.error?.type, attempt: event.attempt })
       const status = event.error?.status
       const type = String(event.error?.type || '')
+      const msg = String(event.error?.message || '')
+      const transport = /transport|econnreset|connection lost|socket|terminated|aborted|premature/i.test(type + ' ' + msg)
       const transient =
+        transport ||
         status === 429 ||
         status === 408 ||
         status === 409 ||
         status === 425 ||
         (typeof status === 'number' && status >= 500) ||
-        /timeout|rate|overload|unavailable|network|fetch|econn|socket/i.test(type)
+        /timeout|rate|overload|unavailable|network|fetch|econn|socket/i.test(type + ' ' + msg)
       if (!transient) return
+      if (transport) {
+        s.transportFails = (s.transportFails || 0) + 1
+        if (s.transportFails === 2) s.forcePrune = true
+        log({ at: 'transport-fail', sessionID: event.sessionID, count: s.transportFails, status, message: msg.slice(0, 160) })
+        // a stream that keeps dying mid-flight will not heal by retrying forever:
+        // give up fast and let the failure path (resume/compaction) take over
+        if (s.transportFails > 5) {
+          log({ at: 'retry-giveup', sessionID: event.sessionID, count: s.transportFails })
+          return
+        }
+      }
       const attempt = Number(event.attempt || 1)
-      const delay = Math.min(120000, 5000 * Math.pow(2, Math.max(0, attempt - 1)))
+      const delay = transport ? Math.min(15000, 3000 * attempt) : Math.min(120000, 5000 * Math.pow(2, Math.max(0, attempt - 1)))
       event.decision = { retry: true, delay }
-      log({ at: 'retry', sessionID: event.sessionID, status, type, attempt, delay })
+      log({ at: 'retry', sessionID: event.sessionID, status, type, attempt, delay, transport })
     })
 
     try {
-      void (async () => {
+      if (!shared.subscribed) {
+        shared.subscribed = true
+        void (async () => {
         for await (const ev of ctx.event.subscribe()) {
           try {
             const type = ev.type
@@ -432,13 +512,18 @@ export default {
               if (type === 'session.tool.success' && s.toolCount % CFG.every === 0) await writeCheckpoint(id, `every-${CFG.every}`)
             } else if (type === 'session.execution.started') {
               s.busy = true
+              s.inflight = true
               s.stalled = false
             } else if (type === 'session.execution.succeeded') {
               s.busy = false
+              s.inflight = false
               s.retryCount = 0
+              s.transportFails = 0
+              s.forcePrune = false
               await writeCheckpoint(id, 'execution-succeeded')
             } else if (type === 'session.execution.failed') {
               s.busy = false
+              s.inflight = false
               const retries = s.retryCount || 0
               s.retryCount = 0
               const fatal = /auth|permission|forbidden|unauthori[sz]ed|401|403|no-route|model.unavailable|model_not_found/i
@@ -446,13 +531,26 @@ export default {
               await writeCheckpoint(id, 'execution-failed')
             } else if (type === 'session.execution.interrupted') {
               s.busy = false
+              s.inflight = false
               s.retryCount = 0
+            } else if (type === 'session.step.ended' || type === 'session.text.ended') {
+              // a step finished: the stream is no longer in flight, re-arm on the next started event
+              s.inflight = false
             } else if (type === 'session.step.failed') {
-              if (d.error) s.lastError = String(d.error?.type || d.error?.message || s.lastError)
+              if (d.error) {
+                const msg = String(d.error?.message || '')
+                s.lastError = String(d.error?.type || msg || s.lastError)
+                if (/transport|econnreset|connection lost|socket|terminated|aborted/i.test(msg + ' ' + s.lastError)) {
+                  s.transportFails = (s.transportFails || 0) + 1
+                  if (s.transportFails >= 2) s.forcePrune = true
+                  log({ at: 'transport-fail', sessionID: id, count: s.transportFails, error: msg.slice(0, 160) })
+                }
+              }
             } else if (type === 'session.status') {
-              const st = d.status?.type || d.status
-              s.busy = st === 'busy' || st === 'running' || st === 'retry'
-              if (s.busy) s.stalled = false
+              const st = String(d.status?.type || d.status || '')
+              s.busy = /busy|running|retry/i.test(st)
+              if (!s.busy) s.inflight = false
+              else s.stalled = false
             } else if (type === 'session.error') {
               s.lastErrorAt = Date.now()
               s.lastError = String(d.error?.type || d.error?.message || 'error')
@@ -469,6 +567,7 @@ export default {
               await writeCheckpoint(id, type.endsWith('failed') ? 'compaction-failed' : 'post-compaction')
             } else if (type === 'session.idle') {
               s.busy = false
+              s.inflight = false
               const fatal = /auth|permission|forbidden|unauthori[sz]ed|401|403|no-route|model.unavailable|model_not_found/i
               let outcome = ''
               try {
@@ -486,29 +585,77 @@ export default {
             log({ at: 'event-error', error: String(e?.message || e) })
           }
         }
-      })()
+        })()
+      }
     } catch (e: any) {
       log({ at: 'subscribe-error', error: String(e?.message || e) })
     }
 
-    if (!timerStarted && CFG.stallMs > 0) {
-      timerStarted = true
+    if (!shared.timerStarted && CFG.stallMs > 0) {
+      shared.timerStarted = true
+      let ticking = false
       const timer = setInterval(() => {
-        const now = Date.now()
-        for (const [id, s] of state) {
-          if (!ours(s)) continue
-          if (!s.busy || s.pending.size > 0 || s.stalled) continue
-          if (now - (s.lastEventAt || now) < CFG.stallMs) continue
-          s.stalled = true
-          log({ at: 'stall', sessionID: id, idleMs: now - s.lastEventAt })
-          void Promise.resolve(ctx.session.interrupt({ sessionID: id }))
-            .then(() => resume(id, 'stream stall'))
-            .catch((e: any) => log({ at: 'stall-error', sessionID: id, error: String(e?.message || e) }))
-        }
-      }, 60000)
+        if (ticking) return
+        ticking = true
+        void (async () => {
+          try {
+            const now = Date.now()
+            for (const [id, s] of state) {
+              if (!ours(s)) continue
+              if (!s.inflight || s.stalled || s.pending.size > 0) continue
+              if (now - (s.lastEventAt || now) < CFG.stallMs) continue
+              const st = await sessionState(id)
+              if (!st.running) {
+                s.inflight = false
+                log({ at: 'stall-skip', sessionID: id, why: 'not-running', status: st.status, outcome: st.outcome })
+                continue
+              }
+              if (!(await needsContinuation(id))) {
+                s.inflight = false
+                log({ at: 'stall-skip', sessionID: id, why: 'answer-present' })
+                continue
+              }
+              s.stalled = true
+              log({ at: 'stall', sessionID: id, idleMs: now - s.lastEventAt, status: st.status })
+              try {
+                await ctx.session.interrupt({ sessionID: id })
+              } catch (e: any) {
+                log({ at: 'stall-error', sessionID: id, error: String(e?.message || e) })
+              }
+              await new Promise((r) => setTimeout(r, 4000))
+              const after = await sessionState(id)
+              if (after.running) {
+                log({ at: 'stall-resolved', sessionID: id, why: 'still-streaming' })
+                s.stalled = false
+                continue
+              }
+              const open = await needsContinuation(id)
+              if (open) void resume(id, 'stream stall')
+              else {
+                s.inflight = false
+                log({ at: 'stall-skip', sessionID: id, why: 'answer-present' })
+              }
+            }
+          } catch (e: any) {
+            log({ at: 'timer-error', error: String(e?.message || e) })
+          } finally {
+            ticking = false
+          }
+        })()
+      }, 30000)
       if (typeof (timer as any).unref === 'function') (timer as any).unref()
     }
 
-    log({ at: 'setup', root, limit: CFG.limit, warn: CFG.warn, compact: CFG.compact, stallMs: CFG.stallMs, onlyModelID: ONLY || 'all' })
+    log({
+      at: 'setup',
+      root,
+      limit: CFG.limit,
+      warn: CFG.warn,
+      compact: CFG.compact,
+      stallMs: CFG.stallMs,
+      maxResumes: CFG.maxResumes,
+      onlyProviderID: ONLY_P || 'all',
+      onlyModelID: ONLY || 'all',
+    })
   },
 }

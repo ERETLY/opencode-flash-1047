@@ -60,6 +60,12 @@ $provider = [ordered]@{
         temperature = $true
       }
       cost         = [ordered]@{ input = 0; output = 0 }
+      variants     = [ordered]@{
+        low    = [ordered]@{ reasoningEffort = 'low' }
+        medium = [ordered]@{ reasoningEffort = 'medium' }
+        high   = [ordered]@{ reasoningEffort = 'high' }
+        max    = [ordered]@{ reasoningEffort = 'max' }
+      }
     }
   }
 }
@@ -76,6 +82,7 @@ $pluginEntry = [ordered]@{
     every          = 20
     stallMs        = 900000
     maxResumes     = 4
+    resumeCooldownMs = 120000
   }
 }
 
