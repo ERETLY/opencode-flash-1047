@@ -79,7 +79,10 @@ as a step-by-step procedure for an agent with file access.
 - **Proactive compaction** – at 85% of the 310K window it asks OpenCode to compact, with a
   3-minute cooldown so it cannot thrash.
 - **Compaction note** – injects tool count, last tool, last user prompt and `.omo/state.md`
-  into the compaction request so the summary keeps operational state.
+  into the compaction request so the summary keeps operational state. It attaches to the last
+  non-tool message, never to a `tool` message: strict protocols (OpenAI Chat, Anthropic
+  Messages) only allow `tool-result` parts there and would reject the whole request with
+  `provider.invalid-request`.
 - **Checkpoints** – writes `.omo/checkpoints/<session>.json` every 20 tool calls, on
   execution start/finish, and around compactions.
 - **Retry policy** – 429/408/409/425/5xx/transport errors retried with backoff. A 5xx such as
@@ -149,6 +152,10 @@ to buy or leak.
   stream after HTTP 200. It is upstream, not your machine and not the config; it happens on the
   paid DeepSeek entries too. The plugin retries transport failures up to 5 times, force-prunes
   stale tool output on the second one, and then lets the turn fail instead of hanging.
+- **Compaction fails with `provider.invalid-request` / `OpenAI Chat tool messages only support
+  tool-result content for now`** – an older copy of the plugin appended the compaction note to
+  the trailing tool message. Update `plugin/resilience/index.ts` to the current version; the
+  compaction then retries and completes.
 - **Resume prompt keeps appearing** – that only happens when a turn really ended with no answer.
   If you see it on a finished turn, check `.omo/logs/resilience.jsonl` for `stall` /
   `stall-skip` / `resume-skip` lines and update to the current plugin version.
