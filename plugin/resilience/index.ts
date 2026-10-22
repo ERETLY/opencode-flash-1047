@@ -17,6 +17,14 @@ const DEFAULTS = {
   keepRecent: 12,
   pruneSoft: 0.55,
   protocol: true,
+  fallbackAfter: 3,
+  // ---- failover ----
+  switchAfter: 2, // consecutive failures on one model before hopping
+  maxSwitches: 8, // per user turn
+  rateCooldownMs: 90000, // a 429'd model is skipped for this long
+  deadCooldownMs: 300000, // a 5xx / "endpoint unavailable" model is skipped for this long
+  restoreAfterMs: 900000, // go back to the primary after 15 min of success elsewhere
+  restoreOnNewTurn: true,
 }
 
 // Injected once per session (only for the guarded model). Mirrors instructions/long-session.md.
@@ -83,12 +91,34 @@ export default {
       keepRecent: Number(opts.keepRecent ?? DEFAULTS.keepRecent),
       pruneSoft: Number(opts.pruneSoft ?? DEFAULTS.pruneSoft),
       protocol: opts.protocol === undefined ? DEFAULTS.protocol : Boolean(opts.protocol),
+      // e.g. ["opencode/nemotron-3.5-lightning-free", "opencode/minimax-m3.1-flash-free"]
+      // used only when the guarded endpoint keeps answering 5xx and retries cannot heal it
+      fallback: Array.isArray(opts.fallback) ? opts.fallback.map((x: any) => String(x)).filter(Boolean) : [],
+      fallbackAfter: Number(opts.fallbackAfter ?? DEFAULTS.fallbackAfter),
+      // ordered pool of equivalent models; the first entry is the primary
+      failover: Array.isArray(opts.failover) ? opts.failover.map((x: any) => String(x).trim()).filter(Boolean) : [],
+      switchAfter: Number(opts.switchAfter ?? DEFAULTS.switchAfter),
+      maxSwitches: Number(opts.maxSwitches ?? DEFAULTS.maxSwitches),
+      rateCooldownMs: Number(opts.rateCooldownMs ?? DEFAULTS.rateCooldownMs),
+      deadCooldownMs: Number(opts.deadCooldownMs ?? DEFAULTS.deadCooldownMs),
+      restoreAfterMs: Number(opts.restoreAfterMs ?? DEFAULTS.restoreAfterMs),
+      restoreOnNewTurn:
+        opts.restoreOnNewTurn === undefined ? DEFAULTS.restoreOnNewTurn : Boolean(opts.restoreOnNewTurn),
     }
 
     // empty = plugin active for every model; set them to guard a single model/provider
     const ONLY = String(opts.onlyModelID ?? '').trim()
     const ONLY_P = String(opts.onlyProviderID ?? '').trim()
-    const ours = (s: any) => (!ONLY || s?.modelID === ONLY) && (!ONLY_P || s?.providerID === ONLY_P)
+    const PRIMARY = ONLY && ONLY_P ? `${ONLY_P}/${ONLY}` : ''
+    const CHAIN = Array.from(new Set([PRIMARY, ...CFG.failover].filter(Boolean)))
+    const modelKey = (s: any) => (s?.providerID && s?.modelID ? `${s.providerID}/${s.modelID}` : '')
+    // the plugin follows the session across the whole pool, not just the primary,
+    // otherwise a switched session would silently stop being managed
+    const ours = (s: any) => {
+      const key = modelKey(s)
+      if (CHAIN.length) return key ? CHAIN.includes(key) : (!ONLY || s?.modelID === ONLY)
+      return (!ONLY || s?.modelID === ONLY) && (!ONLY_P || s?.providerID === ONLY_P)
+    }
 
     const reg: Map<string, any> = GLOBAL.__omniResilience.byRoot
     const regKey = `${root}::${PLUGIN_ID}`
@@ -103,6 +133,67 @@ export default {
         fs.mkdirSync(logs, { recursive: true })
         fs.appendFileSync(path.join(logs, 'resilience.jsonl'), JSON.stringify({ t: new Date().toISOString(), ...o }) + '\n')
       } catch {}
+    }
+
+    // ---- model failover ---------------------------------------------------
+    const parseKey = (key: string) => {
+      const slash = key.indexOf('/')
+      return slash < 0 ? { providerID: '', id: key } : { providerID: key.slice(0, slash), id: key.slice(slash + 1) }
+    }
+    const isDead = (s: any, key: string) => Number(s.dead?.get(key) || 0) > Date.now()
+    const markDead = (s: any, key: string, ms: number) => {
+      if (!key) return
+      if (!s.dead) s.dead = new Map<string, number>()
+      s.dead.set(key, Date.now() + ms)
+    }
+    // next entry in the pool that is neither the current model nor cooling down
+    const pickNext = (s: any) => {
+      const cur = modelKey(s)
+      const n = CHAIN.length
+      if (n < 2) return ''
+      const base = Math.max(0, CHAIN.indexOf(cur))
+      for (let step = 1; step < n; step++) {
+        const cand = CHAIN[(base + step) % n]
+        if (cand && cand !== cur && !isDead(s, cand)) return cand
+      }
+      return ''
+    }
+    const switchTo = async (sessionID: string, s: any, key: string, why: string) => {
+      const api: any = ctx.session
+      const fn = api?.switchModel
+      if (typeof fn !== 'function') {
+        log({ at: 'switch-unavailable', sessionID, keys: Object.keys(api || {}).join(',') })
+        return false
+      }
+      const from = modelKey(s) || 'unknown'
+      const { providerID, id } = parseKey(key)
+      try {
+        await Promise.resolve(fn.call(api, { sessionID, model: { providerID, id } }))
+        s.providerID = providerID
+        s.modelID = id
+        s.lastSwitchAt = Date.now()
+        s.switches = (s.switches || 0) + 1
+        s.modelFails = 0
+        s.transportFails = 0
+        s.retryGiveup = 0
+        log({ at: 'switch', sessionID, from, to: key, why, switches: s.switches })
+        return true
+      } catch (e: any) {
+        log({ at: 'switch-error', sessionID, from, to: key, error: String(e?.message || e) })
+        return false
+      }
+    }
+    // go back to the best non-cooling entry (primary first) at the start of a fresh turn
+    const maybeRestore = async (sessionID: string, s: any) => {
+      if (!CFG.restoreOnNewTurn || CHAIN.length < 2) return
+      const cur = modelKey(s)
+      if (!cur || cur === PRIMARY || !PRIMARY) return
+      if (Date.now() - (s.lastSwitchAt || 0) < CFG.restoreAfterMs) return
+      if (isDead(s, PRIMARY)) {
+        log({ at: 'restore-skip', sessionID, why: 'primary-cooling', from: cur })
+        return
+      }
+      await switchTo(sessionID, s, PRIMARY, 'restore-primary')
     }
 
     const get = (id: string) => {
@@ -129,6 +220,10 @@ export default {
           forcePrune: false,
           prunedChars: 0,
           modelLookup: 0,
+          modelFails: 0,
+          switches: 0,
+          lastSwitchAt: 0,
+          dead: new Map<string, number>(),
         })
       }
       return state.get(id)
@@ -313,7 +408,7 @@ export default {
       }
     }
 
-    await ctx.session.hook('prompt', (event: any) => {
+    await ctx.session.hook('prompt', async (event: any) => {
       const s = get(event.sessionID)
       if (!ours(s)) return
       const text = event.prompt?.text || ''
@@ -324,8 +419,11 @@ export default {
         s.lastResumeAt = 0
         s.transportFails = 0
         s.forcePrune = false
+        s.modelFails = 0
+        s.switches = 0
+        await maybeRestore(event.sessionID, s)
       }
-      log({ at: 'prompt', sessionID: event.sessionID, chars: text.length })
+      log({ at: 'prompt', sessionID: event.sessionID, chars: text.length, model: modelKey(s) })
     })
 
     await ctx.session.hook('context', (event: any) => {
@@ -478,42 +576,82 @@ export default {
         (stateText ? `\n\nCurrent .omo/state.md:\n${stateText}` : '')
       try {
         const msgs = event.messages
+        let target = 'none'
         if (Array.isArray(msgs) && msgs.length) {
-          const last = msgs[msgs.length - 1]
-          if (Array.isArray(last.content)) {
+          // Strict protocols (OpenAI Chat, Anthropic Messages, ...) only allow
+          // `tool-result` parts inside a `tool` message. Appending a `text` part to a
+          // trailing tool message makes the request invalid ("... tool messages only
+          // support tool-result content for now"), so walk back to the last non-tool
+          // message, and fall back to a fresh user message if there is none.
+          let idx = msgs.length - 1
+          while (idx >= 0 && msgs[idx]?.role === 'tool') idx--
+          const last = idx >= 0 ? msgs[idx] : undefined
+          if (last && Array.isArray(last.content)) {
             const textPart = last.content.find((c: any) => c && c.type === 'text')
-            if (textPart && typeof textPart.text === 'string') textPart.text += '\n\n' + note
-            else last.content.push({ type: 'text', text: note })
-          } else if (typeof last.content === 'string') {
+            if (textPart && typeof textPart.text === 'string') {
+              textPart.text += '\n\n' + note
+              target = `${last.role}:text+`
+            } else {
+              last.content.push({ type: 'text', text: note })
+              target = `${last.role}:push`
+            }
+          } else if (last && typeof last.content === 'string') {
             last.content += '\n\n' + note
+            target = `${last.role}:string`
+          } else {
+            msgs.push({ role: 'user', content: [{ type: 'text', text: note }] })
+            target = 'user:new'
           }
         }
-        log({ at: 'compaction-note', sessionID: event.sessionID, injected: true, state: stateText.length })
+        log({
+          at: 'compaction-note',
+          sessionID: event.sessionID,
+          injected: true,
+          state: stateText.length,
+          target,
+        })
       } catch (e: any) {
         log({ at: 'compaction-note-error', error: String(e?.message || e) })
       }
     })
 
-    await ctx.session.hook('retry', (event: any) => {
+    await ctx.session.hook('retry', async (event: any) => {
       const s = get(event.sessionID)
       if (event.model?.id) s.modelID = event.model.id
+      if (event.model?.providerID) s.providerID = event.model.providerID
       if (!ours(s)) return
-      log({ at: 'retry-hook', sessionID: event.sessionID, status: event.error?.status, type: event.error?.type, attempt: event.attempt })
       const status = event.error?.status
       const type = String(event.error?.type || '')
       const msg = String(event.error?.message || '')
+      const blob = `${type} ${msg}`
+      log({ at: 'retry-hook', sessionID: event.sessionID, status, type, attempt: event.attempt, model: modelKey(s) })
       // our own stall interrupt is not a network failure - never retry it
       if (/step interrupted|request aborted by user|interrupted by user/i.test(msg)) return
-      const transport = /transport|econnreset|connection lost|socket|premature|network error|fetch failed/i.test(type + ' ' + msg)
+
+      const transport =
+        /transport|econnreset|connection lost|socket|premature|network error|fetch failed|closed unexpectedly/i.test(blob)
+      const isRate = status === 429 || /rate.?limit|too many requests|quota/i.test(blob)
+      const endpointDead =
+        (typeof status === 'number' && status >= 500) ||
+        /endpoint is unavailable|upstream request failed|unavailable|overload|no route|internal/i.test(blob)
       const transient =
         transport ||
-        status === 429 ||
+        isRate ||
+        endpointDead ||
         status === 408 ||
         status === 409 ||
         status === 425 ||
-        (typeof status === 'number' && status >= 500) ||
-        /timeout|rate|overload|unavailable|network|fetch|econn|socket/i.test(type + ' ' + msg)
+        /timeout|network|fetch|econn|socket/i.test(blob)
       if (!transient) return
+
+      const now = Date.now()
+      if (!s.retryStart || now - s.retryStart > 120000) {
+        s.retryStart = now
+        s.retryCount = 0
+      }
+      s.retryCount = (s.retryCount || 0) + 1
+
+      // --- 1) transport blip: same model, dense retry, smaller request -------------
       if (transport) {
         s.transportFails = (s.transportFails || 0) + 1
         if (s.transportFails === 2) s.forcePrune = true
@@ -522,20 +660,71 @@ export default {
         // give up fast and let the failure path (resume/compaction) take over
         if (s.transportFails > 5) {
           log({ at: 'retry-giveup', sessionID: event.sessionID, count: s.transportFails })
+          s.retryGiveup = now
+          s.transportFails = 0
           return
         }
+        const delay = Math.min(8000, 1200 * Number(event.attempt || 1))
+        event.decision = { retry: true, delay }
+        log({ at: 'retry', sessionID: event.sessionID, reason: 'transport', delay, count: s.retryCount })
+        return
       }
-      const attempt = Number(event.attempt || 1)
-      const isRate = status === 429 || /rate.?limit|too many requests|quota/i.test(type + ' ' + msg)
-      // 5xx / "endpoint unavailable" is usually a short upstream hiccup: retry fast (1s, 2s, 4s)
-      // instead of making the user stare at a 30 s backoff.
-      const delay = transport
-        ? Math.min(8000, 1500 * attempt)
-        : isRate
-          ? Math.min(60000, 5000 * Math.pow(2, Math.max(0, attempt - 1)))
-          : Math.min(5000, 1000 * Math.pow(2, Math.max(0, attempt - 2)))
+
+      // --- 2) this model refuses service: hop to a live sibling in the pool --------
+      if (isRate || endpointDead) {
+        s.modelFails = (s.modelFails || 0) + 1
+        const cur = modelKey(s)
+        if (cur) markDead(s, cur, isRate ? CFG.rateCooldownMs : CFG.deadCooldownMs)
+        if (s.modelFails >= CFG.switchAfter && (s.switches || 0) < CFG.maxSwitches) {
+          const next = pickNext(s)
+          if (next) {
+            const ok = await switchTo(event.sessionID, s, next, isRate ? 'rate-limit' : 'endpoint-unavailable')
+            if (ok) {
+              s.retryStart = 0
+              s.retryCount = 0
+              event.decision = { retry: true, delay: 900 }
+              log({ at: 'retry-after-switch', sessionID: event.sessionID, to: next })
+              return
+            }
+          } else if (CHAIN.length > 1) {
+            // every model in the pool is cooling down: wait out the shortest cooldown
+            const waits = CHAIN.map((k) => Number(s.dead?.get(k) || 0) - now).filter((x) => x > 0)
+            const wait = Math.max(1500, Math.min(20000, waits.length ? Math.min(...waits) + 250 : 5000))
+            event.decision = { retry: true, delay: wait }
+            log({ at: 'retry-pool-empty', sessionID: event.sessionID, wait, cooldowns: waits.length })
+            return
+          }
+        }
+      }
+
+      // --- 3) plain backoff on the current model ----------------------------------
+      const elapsed = now - s.retryStart
+      const budget = isRate ? 60000 : 45000
+      if (elapsed > budget) {
+        log({ at: 'retry-giveup', sessionID: event.sessionID, elapsed, budget, count: s.retryCount, status, type })
+        s.retryStart = 0
+        s.retryCount = 0
+        // do not let the resume path start a second 45 s round against a dead endpoint
+        s.retryGiveup = now
+        return
+      }
+      // smaller request = cheaper retry: the free pool answers big prompts last
+      if (s.retryCount >= 2) s.forcePrune = true
+      const delay = isRate
+        ? Math.min(15000, 3000 * Math.pow(2, Math.max(0, s.retryCount - 1)) * 0.6)
+        : Math.min(2500, 700 + 400 * s.retryCount)
       event.decision = { retry: true, delay }
-      log({ at: 'retry', sessionID: event.sessionID, status, type, attempt, delay, transport, isRate })
+      log({
+        at: 'retry',
+        sessionID: event.sessionID,
+        status,
+        type,
+        delay,
+        isRate,
+        endpointDead,
+        count: s.retryCount,
+        elapsed,
+      })
     })
 
     try {
@@ -572,18 +761,23 @@ export default {
               s.busy = true
               s.inflight = true
               s.stalled = false
+              s.retryGiveup = 0
             } else if (type === 'session.execution.succeeded') {
               s.busy = false
               s.inflight = false
               s.retryCount = 0
+              s.retryStart = 0
               s.transportFails = 0
+              s.modelFails = 0
               s.forcePrune = false
+              log({ at: 'succeeded', sessionID: id, model: modelKey(s), switches: s.switches || 0 })
               await writeCheckpoint(id, 'execution-succeeded')
             } else if (type === 'session.execution.failed') {
               s.busy = false
               s.inflight = false
               const retries = s.retryCount || 0
               s.retryCount = 0
+              s.retryStart = 0
               const fatal = /auth|permission|forbidden|unauthori[sz]ed|401|403|no-route|model.unavailable|model_not_found/i
               if (retries > 0 && !fatal.test(s.lastError)) void resume(id, 'failed after ' + retries + ' retries')
               await writeCheckpoint(id, 'execution-failed')
@@ -591,6 +785,7 @@ export default {
               s.busy = false
               s.inflight = false
               s.retryCount = 0
+              s.retryStart = 0
             } else if (type === 'session.step.ended' || type === 'session.text.ended') {
               // a step finished: the stream is no longer in flight, re-arm on the next started event
               s.inflight = false
@@ -611,7 +806,7 @@ export default {
               s.lastError = String(d.error?.type || d.error?.message || 'error')
               log({ at: 'error', sessionID: id, type: s.lastError })
             } else if (type === 'session.retry.scheduled') {
-              s.retryCount = (s.retryCount || 0) + 1
+              // counting happens once, in the retry hook - this event is informational only
               log({ at: 'retry-scheduled', sessionID: id, attempt: d.attempt, count: s.retryCount })
             } else if (type === 'session.compaction.started') {
               s.compacting = true
@@ -631,8 +826,11 @@ export default {
               } catch {}
               const retries = s.retryCount || 0
               s.retryCount = 0
-              if (outcome === 'failed' && retries > 0 && !fatal.test(s.lastError)) {
+              const gaveUp = s.retryGiveup && Date.now() - s.retryGiveup < 180000
+              if (outcome === 'failed' && retries > 0 && !fatal.test(s.lastError) && !gaveUp) {
                 void resume(id, 'failed after ' + retries + ' retries')
+              } else if (gaveUp) {
+                log({ at: 'resume-skip', sessionID: id, why: 'retry-budget-exhausted' })
               }
               await writeCheckpoint(id, 'idle')
             }
@@ -708,6 +906,11 @@ export default {
       maxResumes: CFG.maxResumes,
       onlyProviderID: ONLY_P || 'all',
       onlyModelID: ONLY || 'all',
+      pool: CHAIN,
+      switchAfter: CFG.switchAfter,
+      maxSwitches: CFG.maxSwitches,
+      restoreAfterMs: CFG.restoreAfterMs,
+      hasSwitchModel: typeof (ctx.session as any)?.switchModel === 'function',
     })
   },
 }
