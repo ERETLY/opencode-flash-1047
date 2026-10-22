@@ -78,11 +78,15 @@ as a step-by-step procedure for an agent with file access.
   and replaced with a marker telling the model to re-read with `grep`/`offset`/`limit`.
 - **Proactive compaction** – at 85% of the 310K window it asks OpenCode to compact, with a
   3-minute cooldown so it cannot thrash.
-- **Compaction note** – injects tool count, last tool, last user prompt and `.omo/state.md`
-  into the compaction request so the summary keeps operational state. It attaches to the last
-  non-tool message, never to a `tool` message: strict protocols (OpenAI Chat, Anthropic
-  Messages) only allow `tool-result` parts there and would reject the whole request with
-  `provider.invalid-request`.
+- **Compaction note** – adds the user's task, tool count, recent tool names and `.omo/state.md`
+  to the compaction request so the summary keeps operational state. It is appended as a **new
+  user message**; the plugin never rewrites an existing message. Rewriting a `tool` message made
+  the whole request invalid on strict protocols (OpenAI Chat: *tool messages only support
+  tool-result content for now*), and appending to an assistant message put instructions inside
+  the model's own past output.
+- **Post-compaction re-anchor** – the first request after a successful compaction gets one system
+  part that quotes the task verbatim and forbids restarting, re-asking or inventing new work.
+  This is the part that keeps a 3-hour task from silently turning into something else.
 - **Checkpoints** – writes `.omo/checkpoints/<session>.json` every 20 tool calls, on
   execution start/finish, and around compactions.
 - **Retry policy** – 429/408/409/425/5xx/transport errors retried with backoff. A 5xx such as
@@ -91,18 +95,24 @@ as a step-by-step procedure for an agent with file access.
   at 1.5s, 3s, 4.5s ... capped at 8s, and only 429/rate-limit gets the long 5s -> 60s backoff.
   After 5 transport failures the plugin stops extending the retry window instead of hanging for
   minutes. It also force-prunes stale tool output on the second reset, since a huge request is
-  the usual reason the gateway drops the stream.
+  the usual reason the gateway drops the stream. **It never switches the session model**: a 429
+  or 5xx only changes the backoff. If the endpoint stays dead, the turn fails and the resume
+  prompt says so, instead of quietly continuing on a different model.
 - **Auto-resume** – after retries are exhausted (and the error is not auth/model-fatal) the
-  session is resumed with a "continue where you left off" prompt, max 4 times per user message.
+  session is resumed with a "continue where you left off" prompt that quotes your task back,
+  max 4 times per user message.
 - **Stall detection** – no provider event for 15 minutes while the server still reports the
   session as running, no pending tools and no finished assistant answer -> interrupt, then
   resume. Every check is verified against the real session state first, so an idle session can
   never be woken up by a stale timer.
-- **Long-session protocol** – one system block per session: keep `.omo/state.md`, grep large
-  files instead of reading them whole, process bulk data with scripts, survive compaction.
+- **No protocol injection** – the long-session rules live in
+  `~/.config/opencode/instructions/long-session.md`, which OpenCode already loads into the system
+  prompt for every session. An earlier version injected a second copy per session; that burned
+  tokens and drifted from the file, so it was removed.
 
-The plugin never touches your other models: it exits immediately unless
-`providerID === "flash1047"`.
+The plugin never touches your other models: it exits immediately unless the session is exactly
+`flash1047/deepseek-v4.1-flash-free` (provider **and** model id are checked, and the default is
+that pair even if the config options are missing).
 
 ## Verified on 2.0.32
 
@@ -120,15 +130,43 @@ The plugin never touches your other models: it exits immediately unless
 | stall detector | verified against session state; hanging provider -> interrupt + resume |
 | reasoning variants | `low/medium/high/max` exposed, `reasoning_effort` sent on the wire |
 | scoping | plugin log lines for the new provider only, zero for the original |
+| model switching | never – `switchModel` is not called on repeated 429/5xx |
+| compaction note | appended as a fresh user message; existing request messages stay byte-identical |
+| live CLI run | `echo hi` tool call + answer on 2026-10-22, plugin loaded, 0 errors, checkpoint written |
+
+## Tests
+
+`test/resilience.test.mjs` drives the plugin through a fake session and a fake event stream, so
+behaviour is asserted instead of eyeballed. No dependencies; Node >= 22.6 strips the TypeScript
+on import.
+
+```bash
+node --experimental-strip-types test/resilience.test.mjs
+```
+
+Last run (2026-10-22, plugin as shipped): **34 / 34 passed**
+
+| area | what is asserted |
+|---|---|
+| scope | another provider/model is never touched, never resumed, never anchored |
+| pruning | stale tool output shrinks, marker is explicit, recent messages stay intact, a second pass is a no-op |
+| compaction note | exactly one appended user message and every existing message stays byte-identical — the exact shape that used to fail with `OpenAI Chat tool messages only support tool-result content for now` |
+| re-anchor | one system part after compaction, quotes the task, injected only once |
+| retry | 5xx / 429 / transport retried, `provider.invalid-request` not retried, gives up after 5 resets |
+| switching | `switchModel` is never called |
+| resume | fires after a failed turn, quotes the task, respects cooldown and `maxResumes` |
+| logging | setup records the guarded entry and `modelSwitching: disabled` |
 
 ## Files
 
 ```
 plugin/resilience/index.ts   the OpenCode v2 plugin
+test/resilience.test.mjs     regression suite (34 assertions, no deps)
 opencode.snippet.jsonc       reference config fragment
 scripts/apply-config.js      idempotent config merge + plugin copy (needs node)
 install.ps1 / install.sh     convenience installers
 INSTALL.md                   procedure written for an AI agent
+CHANGELOG.md                 what changed in v1.1.0
 ```
 
 ## Free-tier note

@@ -5,6 +5,9 @@ const CHARS_PER_TOKEN = 3.6
 const PLUGIN_ID = 'omni-resilience'
 
 const DEFAULTS = {
+  // hard scope: the plugin only ever manages this one entry
+  providerID: 'flash1047',
+  modelID: 'deepseek-v4.1-flash-free',
   contextLimit: 310000,
   warn: 0.7,
   compact: 0.85,
@@ -16,23 +19,11 @@ const DEFAULTS = {
   resumeCooldownMs: 120000,
   keepRecent: 12,
   pruneSoft: 0.55,
-  protocol: true,
-  fallbackAfter: 3,
-  // ---- failover ----
-  switchAfter: 2, // consecutive failures on one model before hopping
-  maxSwitches: 8, // per user turn
-  rateCooldownMs: 90000, // a 429'd model is skipped for this long
-  deadCooldownMs: 300000, // a 5xx / "endpoint unavailable" model is skipped for this long
-  restoreAfterMs: 900000, // go back to the primary after 15 min of success elsewhere
-  restoreOnNewTurn: true,
 }
 
-// Injected once per session (only for the guarded model). Mirrors instructions/long-session.md.
-const PROTOCOL = `[omni-resilience] Long-session protocol for this model.
-State on disk: keep .omo/state.md as working memory (goal, confirmed findings, decisions, TODOs, next step). Update it after every meaningful finding/decision, rewrite when >80 lines. After a compaction or resumed turn, read .omo/state.md and the newest .omo/checkpoints/ file first. Never restart a task from scratch. Put extracted facts in .omo/notes/<topic>.md instead of only in chat.
-Large files/logs: anything over ~50 KB or ~1000 lines is never read whole more than once - locate with grep/ripgrep, then read targeted ranges (offset/limit). Raw bulk output (dumps, scans, JSON, HTML, long logs) goes to disk and is processed by script; only the summary or matching lines enter context. Do not paste big tool output back into the conversation - cite path + line range. Re-read only changed ranges. Batch independent shell commands into one call; never repeat a tool call that already succeeded.
-Context pressure: above ~70% stop exploratory reads and summarise into .omo/state.md; above ~85% finish the current step, write state, let compaction run, do not start a new sub-task. Prefer subagents for wide fan-out (many hosts/files) with narrow self-contained instructions.
-Quality: verify against files or fresh tool output, never invent paths/results/output. On tool failure read the error, adjust, retry once; after two failures change method and record why.`
+// Long-session rules live in ~/.config/opencode/instructions/long-session.md, which OpenCode
+// already loads into the system prompt for every session. The plugin used to inject a second
+// copy per session; that duplicated the text and drifted from the file, so it is gone.
 
 // setup() runs once per location; several instances may load for the same root,
 // so state, the event subscription and the stall timer are shared per root.
@@ -67,8 +58,9 @@ const headTail = (s: string, head: number, tail: number) => {
   const cut = s.length - head - tail
   return (
     s.slice(0, head) +
-    `\n\n[omni-resilience] ${cut} chars elided from the middle of this tool output to protect the context window. ` +
-    `The full output is on disk. Re-run the tool with grep/offset/limit if you need the missing part.\n\n` +
+    `\n\n[omni-resilience] ${cut} chars were removed from the middle of this tool output by the client ` +
+    `to protect the context window. You cannot see them - do not guess or reconstruct their contents. ` +
+    `Re-run the tool with grep/offset/limit if you need that part again.\n\n` +
     s.slice(-tail)
   )
 }
@@ -90,35 +82,16 @@ export default {
       resumeCooldownMs: Number(opts.resumeCooldownMs ?? DEFAULTS.resumeCooldownMs),
       keepRecent: Number(opts.keepRecent ?? DEFAULTS.keepRecent),
       pruneSoft: Number(opts.pruneSoft ?? DEFAULTS.pruneSoft),
-      protocol: opts.protocol === undefined ? DEFAULTS.protocol : Boolean(opts.protocol),
-      // e.g. ["opencode/nemotron-3.5-lightning-free", "opencode/minimax-m3.1-flash-free"]
-      // used only when the guarded endpoint keeps answering 5xx and retries cannot heal it
-      fallback: Array.isArray(opts.fallback) ? opts.fallback.map((x: any) => String(x)).filter(Boolean) : [],
-      fallbackAfter: Number(opts.fallbackAfter ?? DEFAULTS.fallbackAfter),
-      // ordered pool of equivalent models; the first entry is the primary
-      failover: Array.isArray(opts.failover) ? opts.failover.map((x: any) => String(x).trim()).filter(Boolean) : [],
-      switchAfter: Number(opts.switchAfter ?? DEFAULTS.switchAfter),
-      maxSwitches: Number(opts.maxSwitches ?? DEFAULTS.maxSwitches),
-      rateCooldownMs: Number(opts.rateCooldownMs ?? DEFAULTS.rateCooldownMs),
-      deadCooldownMs: Number(opts.deadCooldownMs ?? DEFAULTS.deadCooldownMs),
-      restoreAfterMs: Number(opts.restoreAfterMs ?? DEFAULTS.restoreAfterMs),
-      restoreOnNewTurn:
-        opts.restoreOnNewTurn === undefined ? DEFAULTS.restoreOnNewTurn : Boolean(opts.restoreOnNewTurn),
     }
 
-    // empty = plugin active for every model; set them to guard a single model/provider
-    const ONLY = String(opts.onlyModelID ?? '').trim()
-    const ONLY_P = String(opts.onlyProviderID ?? '').trim()
-    const PRIMARY = ONLY && ONLY_P ? `${ONLY_P}/${ONLY}` : ''
-    const CHAIN = Array.from(new Set([PRIMARY, ...CFG.failover].filter(Boolean)))
+    // Hard scope. The plugin exists for exactly one entry: flash 1047 / deepseek-v4.1-flash-free.
+    // It never switches models and it never manages any other model's session - if the guarded
+    // model is not the one in use, every behaviour below is a no-op.
+    const ONLY = String(opts.onlyModelID ?? DEFAULTS.modelID).trim()
+    const ONLY_P = String(opts.onlyProviderID ?? DEFAULTS.providerID).trim()
+    const GUARDED = ONLY_P && ONLY ? `${ONLY_P}/${ONLY}` : 'unscoped'
     const modelKey = (s: any) => (s?.providerID && s?.modelID ? `${s.providerID}/${s.modelID}` : '')
-    // the plugin follows the session across the whole pool, not just the primary,
-    // otherwise a switched session would silently stop being managed
-    const ours = (s: any) => {
-      const key = modelKey(s)
-      if (CHAIN.length) return key ? CHAIN.includes(key) : (!ONLY || s?.modelID === ONLY)
-      return (!ONLY || s?.modelID === ONLY) && (!ONLY_P || s?.providerID === ONLY_P)
-    }
+    const ours = (s: any) => Boolean(s) && (!ONLY || s.modelID === ONLY) && (!ONLY_P || s.providerID === ONLY_P)
 
     const reg: Map<string, any> = GLOBAL.__omniResilience.byRoot
     const regKey = `${root}::${PLUGIN_ID}`
@@ -135,66 +108,11 @@ export default {
       } catch {}
     }
 
-    // ---- model failover ---------------------------------------------------
-    const parseKey = (key: string) => {
-      const slash = key.indexOf('/')
-      return slash < 0 ? { providerID: '', id: key } : { providerID: key.slice(0, slash), id: key.slice(slash + 1) }
-    }
-    const isDead = (s: any, key: string) => Number(s.dead?.get(key) || 0) > Date.now()
-    const markDead = (s: any, key: string, ms: number) => {
-      if (!key) return
-      if (!s.dead) s.dead = new Map<string, number>()
-      s.dead.set(key, Date.now() + ms)
-    }
-    // next entry in the pool that is neither the current model nor cooling down
-    const pickNext = (s: any) => {
-      const cur = modelKey(s)
-      const n = CHAIN.length
-      if (n < 2) return ''
-      const base = Math.max(0, CHAIN.indexOf(cur))
-      for (let step = 1; step < n; step++) {
-        const cand = CHAIN[(base + step) % n]
-        if (cand && cand !== cur && !isDead(s, cand)) return cand
-      }
-      return ''
-    }
-    const switchTo = async (sessionID: string, s: any, key: string, why: string) => {
-      const api: any = ctx.session
-      const fn = api?.switchModel
-      if (typeof fn !== 'function') {
-        log({ at: 'switch-unavailable', sessionID, keys: Object.keys(api || {}).join(',') })
-        return false
-      }
-      const from = modelKey(s) || 'unknown'
-      const { providerID, id } = parseKey(key)
-      try {
-        await Promise.resolve(fn.call(api, { sessionID, model: { providerID, id } }))
-        s.providerID = providerID
-        s.modelID = id
-        s.lastSwitchAt = Date.now()
-        s.switches = (s.switches || 0) + 1
-        s.modelFails = 0
-        s.transportFails = 0
-        s.retryGiveup = 0
-        log({ at: 'switch', sessionID, from, to: key, why, switches: s.switches })
-        return true
-      } catch (e: any) {
-        log({ at: 'switch-error', sessionID, from, to: key, error: String(e?.message || e) })
-        return false
-      }
-    }
-    // go back to the best non-cooling entry (primary first) at the start of a fresh turn
-    const maybeRestore = async (sessionID: string, s: any) => {
-      if (!CFG.restoreOnNewTurn || CHAIN.length < 2) return
-      const cur = modelKey(s)
-      if (!cur || cur === PRIMARY || !PRIMARY) return
-      if (Date.now() - (s.lastSwitchAt || 0) < CFG.restoreAfterMs) return
-      if (isDead(s, PRIMARY)) {
-        log({ at: 'restore-skip', sessionID, why: 'primary-cooling', from: cur })
-        return
-      }
-      await switchTo(sessionID, s, PRIMARY, 'restore-primary')
-    }
+    // ---- no model failover ------------------------------------------------
+    // This plugin never changes the session model. Switching silently traded the model the user
+    // picked for whatever happened to answer, which cost quality and context shape far more often
+    // than it saved a turn. A dead endpoint is now handled by retry/backoff and, if it stays dead,
+    // by the normal failure path (resume prompt), so the user always knows what happened.
 
     const get = (id: string) => {
       if (!state.has(id)) {
@@ -220,10 +138,8 @@ export default {
           forcePrune: false,
           prunedChars: 0,
           modelLookup: 0,
-          modelFails: 0,
-          switches: 0,
-          lastSwitchAt: 0,
-          dead: new Map<string, number>(),
+          recent: [],
+          anchor: null,
         })
       }
       return state.get(id)
@@ -243,6 +159,14 @@ export default {
           s.providerID = m.providerID
         }
       } catch {}
+    }
+
+    // Scope check for hooks that can fire before the first context request (prompt, retry).
+    // Without this the plugin silently ignored the very first user prompt of a session, which is
+    // exactly the text resume/compaction need in order to keep the task alive.
+    const manage = async (sessionID: string, s: any) => {
+      if (!s.modelID || !s.providerID) await ensureModel(sessionID, s)
+      return ours(s)
     }
 
     const writeCheckpoint = async (sessionID: string, reason: string) => {
@@ -364,7 +288,7 @@ export default {
 
     const resume = async (sessionID: string, reason: string, force = false) => {
       const s = get(sessionID)
-      if (!ours(s)) return
+      if (!(await manage(sessionID, s))) return
       if (s.resumes >= CFG.maxResumes) {
         log({ at: 'resume-capped', sessionID, resumes: s.resumes })
         return
@@ -395,10 +319,12 @@ export default {
       log({ at: 'resume', sessionID, reason, attempt: s.resumes })
       await new Promise((r) => setTimeout(r, 2000))
       try {
+        const task = String(s.lastPrompt || '').trim().slice(0, 500)
         await ctx.session.prompt({
           sessionID,
           text:
             `The previous turn stopped unexpectedly (${reason}). Continue EXACTLY where you left off. ` +
+            (task ? `Your task, verbatim from the user: "${task}". ` : '') +
             `Do not restart the task and do not repeat finished work. Read .omo/state.md and the latest checkpoint if they exist, ` +
             `then perform the next unfinished step. If a tool call failed, retry it or pick an alternative.`,
         })
@@ -410,7 +336,7 @@ export default {
 
     await ctx.session.hook('prompt', async (event: any) => {
       const s = get(event.sessionID)
-      if (!ours(s)) return
+      if (!(await manage(event.sessionID, s))) return
       const text = event.prompt?.text || ''
       // ignore our own resume messages; a real user message opens a new turn budget
       if (!text.startsWith('The previous turn stopped unexpectedly')) {
@@ -419,9 +345,6 @@ export default {
         s.lastResumeAt = 0
         s.transportFails = 0
         s.forcePrune = false
-        s.modelFails = 0
-        s.switches = 0
-        await maybeRestore(event.sessionID, s)
       }
       log({ at: 'prompt', sessionID: event.sessionID, chars: text.length, model: modelKey(s) })
     })
@@ -436,19 +359,27 @@ export default {
 
       s.contextLimit = CFG.limit
 
-      if (CFG.protocol && !s.marks.protocol) {
-        s.marks.protocol = true
-        // survive plugin reloads: never stack a second copy into the same session
-        const already = Array.isArray(event.system)
-          ? event.system.some((p: any) => p && typeof p.text === 'string' && p.text.includes('[omni-resilience] Long-session protocol'))
-          : false
-        if (!already) {
-          event.system.push({ type: 'text', text: PROTOCOL })
-          log({ at: 'protocol', sessionID: event.sessionID, modelID: s.modelID })
-        } else {
-          log({ at: 'protocol-skip', sessionID: event.sessionID, why: 'already-present' })
-        }
+      // ---- post-compaction re-anchor (the anti-drift part) -------------------
+      // Compaction replaces the live conversation with a summary. Without a re-anchor the model
+      // tends to drift into invented work right after it, so the first request after a
+      // successful compaction gets the user's task quoted back, once.
+      if (s.anchor) {
+        const task = String(s.lastPrompt || '').trim().slice(0, 600)
+        const text =
+          `[omni-resilience] The conversation was just compacted; earlier turns now exist only as a summary. ` +
+          (task
+            ? `Your current task, verbatim from the user: "${task}". `
+            : `Your current task is in the summary. `) +
+          `Continue it from .omo/state.md and .omo/checkpoints/${event.sessionID}.json. ` +
+          `Do not restart the task, do not ask the user to repeat anything, and do not invent new work.`
+        event.system.push({ type: 'text', text })
+        s.anchor = null
+        log({ at: 'anchor', sessionID: event.sessionID, reason: 'post-compaction', task: task.length })
       }
+
+      // No protocol injection here: OpenCode already puts instructions/long-session.md into the
+      // system prompt for every session (verified via the instruction blobs), so a second copy
+      // only burned tokens and drifted from the file.
 
       if (event.options && typeof event.options.maxTokens === 'number' && event.options.maxTokens > 32000) {
         event.options.maxTokens = 32000
@@ -471,18 +402,6 @@ export default {
       // ---- adaptive pruning of stale tool output (outgoing request only) ----
       const forced = Boolean(s.forcePrune)
       if ((forced || ratio >= CFG.pruneSoft) && Array.isArray(event.messages)) {
-        try {
-          const firstTool = event.messages.find((m: any) => m?.role === 'tool')
-          log({
-            at: 'prune-check',
-            ratio: Number(ratio.toFixed(3)),
-            soft: CFG.pruneSoft,
-            msgs: event.messages.length,
-            frozenArr: Object.isFrozen(event.messages),
-            frozenMsg: firstTool ? Object.isFrozen(firstTool) : null,
-            frozenPart: firstTool ? Object.isFrozen(firstTool.content?.[0]) : null,
-          })
-        } catch {}
         try {
         const tight = forced || ratio >= CFG.compact
         const keep = tight ? 6 : CFG.keepRecent
@@ -569,39 +488,27 @@ export default {
       try {
         stateText = fs.readFileSync(path.join(root, '.omo', 'state.md'), 'utf8').slice(0, 2500)
       } catch {}
+      const task = String(s.lastPrompt || '').trim().slice(0, 1500)
+      const recent = (s.recent || []).slice(-6).join(', ') || 'none'
       const note =
-        `[omni-resilience] Operational state that MUST survive compaction for session ${event.sessionID}. ` +
-        `Tool calls so far: ${s.toolCount}. Last tool: ${s.lastTool}. Last user request: ${String(s.lastPrompt).slice(0, 1500)}. ` +
-        `Checkpoint: .omo/checkpoints/${event.sessionID}.json. Preserve these facts verbatim in the summary.` +
+        `[omni-resilience] Facts that MUST survive this compaction (session ${event.sessionID}). ` +
+        (task ? `The user's request, verbatim: "${task}". ` : '') +
+        `Work done so far: ${s.toolCount} tool calls; recent tools: ${recent}; last tool: ${s.lastTool}. ` +
+        `Checkpoint: .omo/checkpoints/${event.sessionID}.json. ` +
+        `Preserve the request and these facts verbatim in the summary - never summarise the request away.` +
         (stateText ? `\n\nCurrent .omo/state.md:\n${stateText}` : '')
       try {
         const msgs = event.messages
         let target = 'none'
-        if (Array.isArray(msgs) && msgs.length) {
-          // Strict protocols (OpenAI Chat, Anthropic Messages, ...) only allow
-          // `tool-result` parts inside a `tool` message. Appending a `text` part to a
-          // trailing tool message makes the request invalid ("... tool messages only
-          // support tool-result content for now"), so walk back to the last non-tool
-          // message, and fall back to a fresh user message if there is none.
-          let idx = msgs.length - 1
-          while (idx >= 0 && msgs[idx]?.role === 'tool') idx--
-          const last = idx >= 0 ? msgs[idx] : undefined
-          if (last && Array.isArray(last.content)) {
-            const textPart = last.content.find((c: any) => c && c.type === 'text')
-            if (textPart && typeof textPart.text === 'string') {
-              textPart.text += '\n\n' + note
-              target = `${last.role}:text+`
-            } else {
-              last.content.push({ type: 'text', text: note })
-              target = `${last.role}:push`
-            }
-          } else if (last && typeof last.content === 'string') {
-            last.content += '\n\n' + note
-            target = `${last.role}:string`
-          } else {
-            msgs.push({ role: 'user', content: [{ type: 'text', text: note }] })
-            target = 'user:new'
-          }
+        if (Array.isArray(msgs)) {
+          // Rule: hooks never rewrite an existing message. Adding a text part to a `tool`
+          // message made the whole request invalid on strict protocols (OpenAI Chat:
+          // "tool messages only support tool-result content for now"), and appending to an
+          // assistant message put instructions inside the model's own past output. A fresh
+          // user message at the end is legal on every protocol and is what the summarizer
+          // reads last, so it is the only injection point used here.
+          msgs.push({ role: 'user', content: [{ type: 'text', text: note }] })
+          target = 'user:new'
         }
         log({
           at: 'compaction-note',
@@ -619,7 +526,7 @@ export default {
       const s = get(event.sessionID)
       if (event.model?.id) s.modelID = event.model.id
       if (event.model?.providerID) s.providerID = event.model.providerID
-      if (!ours(s)) return
+      if (!(await manage(event.sessionID, s))) return
       const status = event.error?.status
       const type = String(event.error?.type || '')
       const msg = String(event.error?.message || '')
@@ -670,34 +577,9 @@ export default {
         return
       }
 
-      // --- 2) this model refuses service: hop to a live sibling in the pool --------
-      if (isRate || endpointDead) {
-        s.modelFails = (s.modelFails || 0) + 1
-        const cur = modelKey(s)
-        if (cur) markDead(s, cur, isRate ? CFG.rateCooldownMs : CFG.deadCooldownMs)
-        if (s.modelFails >= CFG.switchAfter && (s.switches || 0) < CFG.maxSwitches) {
-          const next = pickNext(s)
-          if (next) {
-            const ok = await switchTo(event.sessionID, s, next, isRate ? 'rate-limit' : 'endpoint-unavailable')
-            if (ok) {
-              s.retryStart = 0
-              s.retryCount = 0
-              event.decision = { retry: true, delay: 900 }
-              log({ at: 'retry-after-switch', sessionID: event.sessionID, to: next })
-              return
-            }
-          } else if (CHAIN.length > 1) {
-            // every model in the pool is cooling down: wait out the shortest cooldown
-            const waits = CHAIN.map((k) => Number(s.dead?.get(k) || 0) - now).filter((x) => x > 0)
-            const wait = Math.max(1500, Math.min(20000, waits.length ? Math.min(...waits) + 250 : 5000))
-            event.decision = { retry: true, delay: wait }
-            log({ at: 'retry-pool-empty', sessionID: event.sessionID, wait, cooldowns: waits.length })
-            return
-          }
-        }
-      }
-
-      // --- 3) plain backoff on the current model ----------------------------------
+      // --- 2) backoff on this model only. No switching: the session keeps the model the user
+      // picked. A 429 waits longer, a 5xx/overload waits shorter, a dead endpoint eventually
+      // gives up and lets the failure path (resume prompt) surface it instead of hiding it.
       const elapsed = now - s.retryStart
       const budget = isRate ? 60000 : 45000
       if (elapsed > budget) {
@@ -756,6 +638,9 @@ export default {
               if (d.id) s.pending.delete(d.id)
               s.toolCount += 1
               s.lastTool = d.name || d.tool || s.lastTool
+              if (s.lastTool && s.lastTool !== 'none') {
+                s.recent = [...(s.recent || []), String(s.lastTool)].slice(-8)
+              }
               if (type === 'session.tool.success' && s.toolCount % CFG.every === 0) await writeCheckpoint(id, `every-${CFG.every}`)
             } else if (type === 'session.execution.started') {
               s.busy = true
@@ -768,9 +653,8 @@ export default {
               s.retryCount = 0
               s.retryStart = 0
               s.transportFails = 0
-              s.modelFails = 0
               s.forcePrune = false
-              log({ at: 'succeeded', sessionID: id, model: modelKey(s), switches: s.switches || 0 })
+              log({ at: 'succeeded', sessionID: id, model: modelKey(s) })
               await writeCheckpoint(id, 'execution-succeeded')
             } else if (type === 'session.execution.failed') {
               s.busy = false
@@ -814,6 +698,9 @@ export default {
             } else if (type === 'session.compaction.ended' || type === 'session.compaction.failed') {
               s.compacting = false
               s.marks = {}
+              // re-anchor the model on the next request: compaction moves the conversation into a
+              // summary, which is exactly where agents drift into invented work
+              if (type === 'session.compaction.ended') s.anchor = { at: Date.now(), reason: 'compaction' }
               await writeCheckpoint(id, type.endsWith('failed') ? 'compaction-failed' : 'post-compaction')
             } else if (type === 'session.idle') {
               s.busy = false
@@ -899,18 +786,13 @@ export default {
     log({
       at: 'setup',
       root,
+      guarded: GUARDED,
       limit: CFG.limit,
       warn: CFG.warn,
       compact: CFG.compact,
       stallMs: CFG.stallMs,
       maxResumes: CFG.maxResumes,
-      onlyProviderID: ONLY_P || 'all',
-      onlyModelID: ONLY || 'all',
-      pool: CHAIN,
-      switchAfter: CFG.switchAfter,
-      maxSwitches: CFG.maxSwitches,
-      restoreAfterMs: CFG.restoreAfterMs,
-      hasSwitchModel: typeof (ctx.session as any)?.switchModel === 'function',
+      modelSwitching: 'disabled',
     })
   },
 }
