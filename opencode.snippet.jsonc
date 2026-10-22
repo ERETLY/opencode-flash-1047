@@ -1,0 +1,68 @@
+{
+  // Merge these blocks into ~/.config/opencode/opencode.jsonc
+  // Keep everything that is already in your file.
+  "provider": {
+    "flash1047": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "flash 1047",
+      "options": {
+        "baseURL": "https://opencode.ai/inference/openai/v1",
+        "apiKey": "public"
+      },
+      "models": {
+        "deepseek-v4.1-flash-free": {
+          "name": "flash 1047 - Super Free",
+          "limit": { "context": 310000, "output": 32000 },
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "input": ["text", "image"],
+            "output": ["text"],
+            "temperature": true
+          },
+          "cost": { "input": 0, "output": 0 },
+          // reasoning effort selector in the model picker: low / medium / high / max
+          "variants": {
+            "low": { "reasoningEffort": "low" },
+            "medium": { "reasoningEffort": "medium" },
+            "high": { "reasoningEffort": "high" },
+            "max": { "reasoningEffort": "max" }
+          }
+        }
+      }
+    }
+  },
+  // Runtime safety net. buffer 40000 -> auto-compaction at 270000, above the plugin's
+  // 263500 (85%) trigger and below the measured 319123-token ceiling.
+  // keep.tokens must equal plugins[].options.keep.
+  "compaction": {
+    "auto": true,
+    "keep": { "tokens": 32000 },
+    "buffer": 40000
+  },
+  // Long-session rules (instructions/long-session.md in this repo, copied by the installers).
+  // OpenCode v2 loads only AGENTS.md automatically; anything else must be listed here. Relative
+  // entries are resolved from the workspace upward, so use a ~/ or absolute path for a global file.
+  "instructions": ["~/.config/opencode/instructions/long-session.md"],
+
+  "plugins": [
+    {
+      "package": "./plugins/resilience",
+      "options": {
+        "onlyProviderID": "flash1047",
+        "onlyModelID": "deepseek-v4.1-flash-free",
+        "contextLimit": 310000,
+        // must equal compaction.keep.tokens: the runtime cannot compact below it
+        "keep": 32000,
+        "warn": 0.7,
+        "compact": 0.85,
+        "hard": 0.93,
+        "pruneSoft": 0.7,
+        "every": 20,
+        "stallMs": 900000,
+        "maxResumes": 4,
+        "resumeCooldownMs": 120000
+      }
+    }
+  ]
+}
