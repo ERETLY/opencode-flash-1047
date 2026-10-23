@@ -1,5 +1,8 @@
 # INSTALL — procedure for an AI assistant
 
+> Human? Use [`README.md`](README.md) — it has a 60-second quick start. This file is the same
+> procedure written for an agent that is asked to "install this model".
+
 You are installing a model entry + plugin into **OpenCode 2.x** on the user's machine.
 Follow the steps exactly. Do not invent files that are not listed here.
 Everything you need is inside this repository.

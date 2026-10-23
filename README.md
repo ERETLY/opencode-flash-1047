@@ -1,71 +1,143 @@
 # flash 1047 — Super Free
 
-A hardened, long-session-safe entry for the free `deepseek-v4.1-flash-free` model in
-**OpenCode 2.x**, plus the plugin that keeps multi-hour runs from dying.
+[![release](https://img.shields.io/github/v/release/ERETLY/opencode-flash-1047?label=release)](https://github.com/ERETLY/opencode-flash-1047/releases)
+[![tests](https://img.shields.io/badge/tests-103%2F103-brightgreen)](#tests-and-evidence)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![opencode](https://img.shields.io/badge/OpenCode-2.x-black)](https://opencode.ai)
 
-**Version:** v1.6.1 · **Status:** stable - 103/103 unit tests, live-verified on OpenCode 2.1.3
-(two consecutive compactions completed, zero emergency trims across a 250k-token session) ·
+A free **310K-context** `deepseek-v4.1-flash-free` entry for **OpenCode 2.x**, plus the plugin that
+keeps multi-hour sessions from dying, drifting, or quietly getting dumber.
+
+**Version:** v1.6.1 · **Status:** stable — 103/103 unit tests, live-verified on OpenCode 2.1.3 ·
 **Cost:** $0 · **Scope:** one provider, one model id, nothing else is touched.
-
----
-
-## 1. Why this exists
-
-The free gateway is generous but it has three properties that break long sessions:
-
-1. **The advertised window is wrong.** The stock `opencode/deepseek-v4.1-flash-free` entry declares
-   200 000 tokens. Measured against the real gateway, **319 123 tokens were accepted and 325 760
-   were rejected** with `400 context_length_exceeded`. Meanwhile nothing in the client stops a
-   session from walking straight into that wall.
-2. **The client's own accounting is an estimate, and it is biased.** `chars / 3.6` is close for
-   English and off by roughly 45% for Cyrillic, CJK and emoji. A session that "looks" like 60%
-   can already be at 85% of what the endpoint will accept.
-3. **The free pool is flaky in specific, recoverable ways.** Streams die after HTTP 200
-   (`ECONNRESET`), 429s appear in bursts, and a request that is too large is simply answered last
-   or refused. A single failed turn in a three-hour task is expensive: the model forgets what it
-   was doing, or worse, invents new work.
-
-`flash1047` is one model entry plus a plugin that addresses exactly those three problems: a
-correct window size, a calibrated running estimate, and a recovery policy that never silently
-swaps the model the user picked.
-
-## 2. What it is, concretely
-
-| | stock entry | flash 1047 |
-|---|---|---|
-| provider | `opencode` | `flash1047` |
-| model id | `deepseek-v4.1-flash-free` | `deepseek-v4.1-flash-free` |
-| declared context | 200 000 (metadata) | **310 000** (measured safe) |
-| output | 32 000 | 32 000 |
-| cost | $0 | **$0** |
-| reasoning effort | low / high / max | **low / medium / high / max** |
-| resilience plugin | no | **yes** |
-
-Your original entry keeps working untouched. The plugin checks **provider and model id** against
-`flash1047/deepseek-v4.1-flash-free` and exits on anything else, so an unrelated session produces
-exactly one log line and no behaviour.
-
-Three layers, each replaceable on its own:
-
-```
-opencode.jsonc            provider entry (window, variants)  +  plugin options  +  compaction tuning
-        │
-        ├── plugins/resilience/index.ts     the runtime behaviour (hooks, estimate, recovery)
-        │
-        └── instructions/long-session.md    the rules the model reads (state.md, read discipline)
-```
-
-## 3. Quick start
 
 ```powershell
 # Windows
 powershell -ExecutionPolicy Bypass -File .\install.ps1
-
+```
+```bash
 # macOS / Linux
 bash install.sh
 ```
 
-Then **quit OpenCode completely** (tray icon → Quit, not just close the window) and start it again.
+Then quit OpenCode completely, reopen it, and pick **flash 1047 - Super Free**. Details in
+[Quick start](#quick-start).
+
+---
+
+## Contents
+
+1. [Who this is for](#who-this-is-for)
+2. [Why this model](#why-this-model)
+3. [What it fixes](#what-it-fixes)
+4. [Speed expectations](#speed-expectations)
+5. [Quick start](#quick-start)
+6. [How a request flows](#how-a-request-flows)
+7. [Context policy](#context-policy)
+8. [Options](#options)
+9. [Presets](#presets)
+10. [Behaviour reference](#behaviour-reference)
+11. [The log](#the-log)
+12. [Tests and evidence](#tests-and-evidence)
+13. [Troubleshooting](#troubleshooting)
+14. [FAQ](#faq)
+15. [Files](#files)
+16. [Uninstall](#uninstall)
+17. [Free-tier note and limits](#free-tier-note-and-limits)
+18. [Changelog](#changelog)
+19. [License](#license)
+
+---
+
+## Who this is for
+
+- You use the **free** `deepseek-v4.1-flash-free` model in OpenCode and a long task (an hour or
+  more) ends with a dead session, an early compaction, a lost thread, or the model inventing work.
+- You want the **biggest window you can actually use** — 310 000 tokens measured, not the 200 000
+  the stock entry claims.
+- You want a plugin that **never swaps your model** and never silently changes the answer quality.
+
+## Who this is not for
+
+- **Hard reasoning problems.** This is a free Flash-tier model. It is good at bulk edits, refactors,
+  test loops and long mechanical work; it is not a frontier model and will lose to one on design
+  questions. If that is the job, pay for a better model.
+- **Low latency.** A long session costs 10–30 s per model step, and one user message can be ~11
+  steps. See [Speed expectations](#speed-expectations).
+- **Not OpenCode.** The provider block is OpenCode-specific and the plugin is an OpenCode 2.x plugin.
+
+## Why this model
+
+| | stock `opencode` entry | flash 1047 |
+|---|---|---|
+| price | $0 | **$0** |
+| declared context | 200 000 (wrong) | **310 000** (measured safe) |
+| accepted by the gateway | ~319 123 tokens | 319 123 measured, 325 760 rejected |
+| output | 32 000 | 32 000 |
+| reasoning effort | low / high / max | **low / medium / high / max** |
+| long-session plugin | no | **yes** |
+| model switching | — | **never** |
+
+Why bother instead of the stock entry: the stock one declares 200 000, so either you compact far too
+early or you hit `400 context_length_exceeded` while the client still thinks there is room. This
+entry declares a number the gateway actually accepts and adds the bookkeeping that keeps you under
+it. The free pool is also flaky in specific, recoverable ways — dead streams, 429 bursts, summariser
+truncation — and those are handled instead of being left to kill the session.
+
+When to use something else, plainly: **hard architecture, novel algorithms, subtle bugs** — use a
+paid frontier model. **Cheap, long, mechanical, high-volume work** — this is what the free Flash
+model is good at, and the 310K window is what makes it usable for hours.
+
+## What it fixes
+
+| symptom you have seen | cause | what this repo does |
+|---|---|---|
+| `400 context_length_exceeded` around 200k | the declared window is wrong | declares 310 000, measures real usage, calibrates per model |
+| compaction fires every turn and fails | cooldown counted from the request, not the failure | backoff measured from the failure: 3 → 6 → 12 → 24 → 30 min |
+| the session goes idle after compaction and waits for you | nothing continues the turn | auto-continue prompt + `.omo/goal.md` on disk |
+| "the model forgot what I asked" | the summary paraphrased your requirements away | the compaction note carries your last four asks **verbatim**, and `goal.md` keeps a `## Requirements` section |
+| the model gets lazy in long chats | pressure notes said "keep replies short, avoid re-reading" | notes now say: full quality, verify, use targeted reads, record findings |
+| a stream dies mid-answer (`ECONNRESET`) | the free gateway closes it | transport retry, force-prune on the second failure |
+| the whole session dies at ~250k | the summariser stream gets truncated | emergency trim: old tool output and old text are cut, the session keeps working |
+| it looks like the model is "hanging" | hidden reasoning + retries + many steps | visible: `compact-backoff` / `retry` / `ctx` lines in `.omo/logs/resilience.jsonl` |
+
+## Speed expectations
+
+Measured on a real 250k-token session: 96 user messages, 1 047 assistant steps, 1 093 tool calls.
+
+| | |
+|---|---|
+| model calls per user message | ~11 |
+| generation per step, median / p90 | 10.4 s / 30 s |
+| total generation time in that session | ~4 hours |
+| context re-sent per step | ~155 000 tokens (cached) |
+
+A step costs roughly what the context costs, so a fresh chat answers in seconds while a 250k
+session costs 10–30 s per step. The plugin makes long sessions **survivable**, not **fast**: it caps
+the context at 310 000, trims old tool output and stops compaction from storming.
+
+Two practical notes:
+
+- **Start a new session for a new task.** That resets the per-step cost from ~155k tokens to a few
+  thousand. It is the single biggest speed lever there is.
+- **`high` vs `max` is not a speed lever.** Measured medians differ by under 10%; pick the variant on
+  quality, not on speed.
+
+## Quick start
+
+Requirements: OpenCode 2.x. The installers use Node.js or Python **only if present**; the manual path
+needs neither.
+
+```powershell
+# Windows
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+```bash
+# macOS / Linux
+bash install.sh
+```
+
+Then **quit OpenCode completely** (tray icon → Quit, not just closing the window) and start it again.
 Pick **flash 1047 - Super Free** in the model list.
 
 Verification, in order — if all three pass, the install is live:
@@ -76,14 +148,11 @@ Verification, in order — if all three pass, the install is live:
 | `.omo/logs/resilience.jsonl` in your project | a `setup` line with `"guarded":"flash1047/deepseek-v4.1-flash-free"` |
 | after a few turns | `ctx` lines whose `used` tracks real usage, and no `compact-error` |
 
-No Node.js or Python is needed for the manual path; the installers use them only when present.
-
 Custom config location:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -ConfigDir "D:\tools\opencode"
 ```
-
 ```bash
 node scripts/apply-config.js --dir "D:\tools\opencode"   # cross-platform merge, no shell
 ```
@@ -91,10 +160,10 @@ node scripts/apply-config.js --dir "D:\tools\opencode"   # cross-platform merge,
 `install.sh` honours `XDG_CONFIG_HOME` as well as `$HOME`. For an AI assistant, hand it
 [`INSTALL.md`](INSTALL.md) and say *"install this model"*.
 
-## 4. How a request flows
+## How a request flows
 
-The plugin is three hooks and one event stream. Every mutation is applied to the **outgoing
-request only**; the stored session is never rewritten.
+The plugin is three hooks and one event stream. Every mutation is applied to the **outgoing request
+only**; the stored session is never rewritten.
 
 ```
  user prompt
@@ -123,14 +192,14 @@ Why step 7 matters: the provider reports usage for the request that was **sent**
 (0.44 instead of 1.2 in the regression test), so every later decision under-counted and the 85%
 trigger fired far above the real ceiling. This was the v1.3.0 fix and it has a dedicated test.
 
-## 5. Context policy
+## Context policy
 
 Thresholds are fractions of `contextLimit` (310 000 as shipped):
 
 | level | value | tokens | what happens |
 |---|---|---|---|
 | `pruneSoft` | 70% | 217 000 | start eliding the middle of stale tool output |
-| `warn` | 70% | 217 000 | note: keep replies short, stop re-reading large files |
+| `warn` | 70% | 217 000 | note: work at full quality, prefer targeted reads, record findings |
 | `compact` | **85%** | 263 500 | request compaction, then re-anchor |
 | `hard` | 93% | 288 300 | last-resort note if compaction did not reduce usage |
 | runtime auto | — | 270 000 | OpenCode's own compaction, kept as a safety net |
@@ -181,7 +250,7 @@ marker:
 At `compact` pressure the retained head/tail shrink further and only the last 6 tool results stay
 intact. That is why a 200 000-character log does not have to end the session.
 
-## 6. Options
+## Options
 
 Every option is passed through `plugins[].options` in `opencode.jsonc`. Defaults shown are the
 plugin's, and the shipped config overrides only `keep` and `contextLimit`.
@@ -209,7 +278,7 @@ plugin's, and the shipped config overrides only `keep` and `contextLimit`.
 | `resumeCooldownMs` | `120000` | minimum gap between resumes |
 | `warnMode` | `"tail"` | `"tail"` appends the note after the history; `"system"` puts it in the system prompt |
 
-## 7. Presets
+## Presets
 
 **Quality** (shipped) — multi-hour work where losing detail costs more than sending big requests.
 
@@ -230,7 +299,7 @@ Why quality is the default: at 85% there is ~46 000 tokens of headroom against a
 estimator error, `keep` 32 000 retains 8 000 more tokens verbatim across a compaction, and
 pruning starts where there is still room rather than at 170 000. The cost is latency, not money.
 
-## 8. Behaviour reference
+## Behaviour reference
 
 | mechanism | policy |
 |---|---|
@@ -246,7 +315,7 @@ pruning starts where there is still room rather than at 170 000. The cost is lat
 | **re-anchor** | one system part after compaction: quotes the task, forbids restarting or inventing work |
 | **goal file** | `.omo/goal.md` on every substantive message: the task, the last four asks verbatim, the last nudge |
 | **compaction note** | appended as a **new user message** with the user's own words, paths with line ranges, commands, errors, last step, `.omo/state.md` |
-| **compaction failure** | silence, not a retry: the cooldown is measured from the failure and doubles 3 -> 6 -> 12 -> 24 -> 30 min |
+| **compaction failure** | silence, not a retry: the cooldown is measured from the failure and doubles 3 → 6 → 12 → 24 → 30 min |
 | **emergency mode** | after two failures: above `emergencyRatio` old tool output becomes 600/200 chars, old assistant text and reasoning 600 chars, the last six messages stay byte-identical, and a handoff note carries the goal plus `.omo/state.md` |
 
 The compaction note is a new message on purpose. Adding a text part to a `tool` message makes the
@@ -254,25 +323,7 @@ request invalid on strict protocols (`OpenAI Chat: tool messages only support to
 for now`), and appending to an assistant message puts instructions inside the model's own past
 output. A fresh trailing user message is legal everywhere.
 
-### What speed to expect
-
-Measured on a real 250k-token session: 96 user messages, 1 047 assistant steps, 1 093 tool calls.
-
-| | |
-|---|---|
-| model calls per user message | ~11 |
-| generation per step, median / p90 | 10.4 s / 30 s |
-| total generation time | ~4 hours |
-| context re-sent per step | ~155 000 tokens (cached) |
-
-A step costs roughly what the context costs, so a fresh chat answers in seconds while a 250k
-session costs 10-30 s per step. This plugin makes long sessions **survivable**, not **fast**: it
-caps the context at 310 000, trims old tool output and stops compaction from storming. If latency
-matters more than continuity, start a new session - that resets the per-step cost to a few thousand
-tokens. Switching the variant from `max` to `high` changes the measured median by under 10%, so it
-is not a speed lever.
-
-## 9. The log
+## The log
 
 `.omo/logs/resilience.jsonl`, one JSON object per line, in the project directory. The `at` field is
 the event name:
@@ -314,9 +365,9 @@ plugin when it starts a server instance for a project, which usually happens on 
 `setup` line with the new version appears after the file changes); if it still shows the old
 version, quit the app completely and reopen it. No `setup` line for your session at all is the other,
 more common case: the session is not on `flash1047/deepseek-v4.1-flash-free`, so the plugin is doing
-exactly what it promises - nothing.
+exactly what it promises — nothing.
 
-## 10. Tests and evidence
+## Tests and evidence
 
 ```bash
 node --experimental-strip-types test/resilience.test.mjs   # Node >= 22.6, no dependencies
@@ -360,7 +411,7 @@ Run live on **OpenCode 2.1.3**, v1.6.0/v1.6.1, author's install:
 |---|---|
 | compactions | two completions in one session (summary 5 567 and 6 633 chars), no `compact-backoff` between them |
 | emergency trim | zero `emergency-trim` lines in a 250k-token session |
-| pruning volume | 1 499-3 099 chars per request - tool output only, history untouched |
+| pruning volume | 1 499–3 099 chars per request — tool output only, history untouched |
 | plugin reload | a `setup` line with `plugin: 1.6.1` appeared after the file changed, without restarting the app |
 | session footprint | 1 047 model steps, 1 093 tool calls, 1.29 M chars of hidden reasoning, 145k chars of visible text |
 
@@ -370,7 +421,62 @@ stay environment-dependent and are deliberately not asserted: gateway latency an
 summariser stream gets truncated, because both move with the free pool's load. The plugin reacts to
 them (transport retry, compaction backoff, emergency trim) instead of pretending to predict them.
 
-## 11. Files
+## Troubleshooting
+
+| symptom | cause and fix |
+|---|---|
+| **compacts on every turn** | `contextLimit` ≠ provider `limit.context`, or `keep` ≠ `compaction.keep.tokens`. The log shows `compact-error: Nothing to compact yet`. |
+| **runtime compacts before the plugin** | `compaction.buffer` too small; 40 000 puts runtime auto at 270 000, above the plugin's 263 500. |
+| **model missing from the list** | invalid JSONC, wrong provider key (must be `flash1047`), or OpenCode not fully restarted. |
+| **`400 Model is unavailable`** | the model key must stay `deepseek-v4.1-flash-free`; only `name` is cosmetic. |
+| **no plugin activity** | no `setup` line → wrong path. It must be `~/.config/opencode/plugins/resilience/index.ts`, a **directory** containing `index.ts`. |
+| **`ECONNRESET` after HTTP 200** | the free gateway closed the stream. Handled: transport retry, force-prune on the 2nd, then a clean failure instead of a hang. |
+| **a long chat feels slow** | one user message costs ~11 model calls, each re-reading the whole context: measured 10–30 s per step at 250k tokens. Start a new session for a new task. The plugin caps and trims; it does not make the model faster. |
+| **`compact-backoff` with a growing `fails`** | the gateway keeps truncating the summariser. Nothing to fix: the session continues through the emergency trim until a compaction gets through. |
+| **compaction fails with `provider.invalid-request`** | an old plugin appended the note to the trailing tool message. Update `plugin/resilience/index.ts`. |
+| **resume prompt keeps appearing** | a turn genuinely ended with no answer. Check `stall*` / `resume-skip` lines. |
+| **every log line appears twice** | the plugin is loaded twice (directory scan + `plugins` config entry). Since v1.3.3 the second load logs `setup-duplicate` and does not register hooks; if you still see doubles, an older build is running — check `plugin` in the `setup` line. |
+| **context grows by ~50 tokens per request** | that is the pressure note while a level holds; it is stripped before the next request, so it does not accumulate. |
+
+## FAQ
+
+**Does it switch models or silently fall back?**
+No. `switchModel` is never called; a test fails the suite if it ever is. If the model dies, you get a
+retry, a resume prompt, or a clean error — not a different model.
+
+**Does it cost anything?**
+No. The endpoint is OpenCode's free gateway; there is no key to buy.
+
+**Will it break my stock `opencode/deepseek-v4.1-flash-free` entry?**
+No. It adds a separate `flash1047` provider and never edits the stock block. Uninstall removes only
+what this repo added.
+
+**Why 310 000 and not 320 000?**
+Because 319 123 was accepted and 325 760 was rejected by the gateway. 310 000 leaves room for
+estimator error while staying under the wall, and the plugin clamps the reply reservation below
+318 000 anyway.
+
+**The window says 310 000 but my session compacted at 263 500.**
+That is intentional: compaction at 85% keeps ~46 000 tokens of headroom, so one mis-estimated
+request cannot blow the request up. Raise `compact` if you prefer living closer to the edge.
+
+**Does it work on Windows, macOS and Linux?**
+Yes. `install.ps1` for Windows, `install.sh` for macOS/Linux, and `scripts/apply-config.js` if you
+prefer no shell at all.
+
+**Can I use it with a different model?**
+The provider block is specific to `deepseek-v4.1-flash-free` and the plugin is scoped to
+`flash1047/deepseek-v4.1-flash-free`. Point it at something else and it does nothing — by design.
+
+**Why does output sometimes stop mid-sentence and then continue?**
+A dead stream gets retried. The retry is visible in the log as `retry` / `transport-fail`; it is not
+a silent answer change.
+
+**Is this safe to run for a whole workday?**
+That is what the test suite and the live sessions target: hours of work with compaction, pruning and
+retries. The failure modes it cannot remove are the free pool's latency and load.
+
+## Files
 
 ```
 plugin/resilience/index.ts    the OpenCode v2 plugin
@@ -381,26 +487,10 @@ scripts/apply-config.js       idempotent config merge + plugin and rules copy (n
 install.ps1 / install.sh      convenience installers
 INSTALL.md                    procedure written for an AI agent
 CHANGELOG.md                  what changed and why, per version
+LICENSE                       MIT
 ```
 
-## 12. Troubleshooting
-
-| symptom | cause and fix |
-|---|---|
-| **compacts on every turn** | `contextLimit` ≠ provider `limit.context`, or `keep` ≠ `compaction.keep.tokens`. The log shows `compact-error: Nothing to compact yet`. |
-| **runtime compacts before the plugin** | `compaction.buffer` too small; 40 000 puts runtime auto at 270 000, above the plugin's 263 500. |
-| **model missing from the list** | invalid JSONC, wrong provider key (must be `flash1047`), or OpenCode not fully restarted. |
-| **`400 Model is unavailable`** | the model key must stay `deepseek-v4.1-flash-free`; only `name` is cosmetic. |
-| **no plugin activity** | no `setup` line → wrong path. It must be `~/.config/opencode/plugins/resilience/index.ts`, a **directory** containing `index.ts`. |
-| **`ECONNRESET` after HTTP 200** | the free gateway closed the stream. Handled: transport retry, force-prune on the 2nd, then a clean failure instead of a hang. |
-| **a long chat feels slow** | one user message costs ~11 model calls, each re-reading the whole context: measured 10-30 s per step at 250k tokens. Start a new session for a new task. The plugin caps and trims; it does not make the model faster. |
-| **`compact-backoff` with a growing `fails`** | the gateway keeps truncating the summariser. Nothing to fix: the session continues through the emergency trim until a compaction gets through. |
-| **compaction fails with `provider.invalid-request`** | an old plugin appended the note to the trailing tool message. Update `plugin/resilience/index.ts`. |
-| **resume prompt keeps appearing** | a turn genuinely ended with no answer. Check `stall*` / `resume-skip` lines. |
-| **every log line appears twice** | the plugin is loaded twice (directory scan + `plugins` config entry). Since v1.3.3 the second load logs `setup-duplicate` and does not register hooks; if you still see doubles, an older build is running — check `plugin` in the `setup` line. |
-| **context grows by ~50 tokens per request** | that is the pressure note while a level holds; it is stripped before the next request, so it does not accumulate. |
-
-## 13. Uninstall
+## Uninstall
 
 1. Quit OpenCode.
 2. Remove the `flash1047` provider block, the `plugins` entry with `"./plugins/resilience"`, and —
@@ -412,7 +502,7 @@ CHANGELOG.md                  what changed and why, per version
 
 Nothing else is touched: no global state, no environment variables, no background process.
 
-## 14. Free-tier note
+## Free-tier note and limits
 
 The endpoint is OpenCode's own free inference gateway. Requests carry
 `Authorization: Bearer public` plus the client's `x-opencode-client` header, and the gateway only
@@ -420,10 +510,18 @@ accepts them **from inside the OpenCode client** — which is why the provider i
 `@ai-sdk/openai-compatible` instead of being called with curl. Cost stays $0; there is no key to
 buy or leak.
 
-## 15. Changelog
+Limits worth knowing before you build on it:
+
+- the free pool is shared, so latency and truncation rates vary with load;
+- the model is Flash-tier: excellent for mechanical work, weaker on hard reasoning;
+- the window is measured, not guaranteed — if the gateway changes, watch `ctx` and `calibrate` lines
+  and treat them as the source of truth.
+
+## Changelog
 
 - **v1.6.1** — the pressure notes no longer tell the model to be brief; the compaction note now carries
   the user's own words, file paths with line ranges, commands and errors, and forbids paraphrasing.
+  `goal.md` keeps every ask verbatim under `## Requirements`.
 - **v1.6.0** — compaction failures are no longer retried into a storm (backoff doubles per failure)
   and, after two failures, an emergency trim keeps the session alive without compaction: old tool
   output and old assistant text are cut, the recent tail and a goal+state handoff note remain.
@@ -442,3 +540,7 @@ buy or leak.
 - **v1.2.0** — quality defaults for multi-hour tasks.
 
 Details and reasoning per version: [`CHANGELOG.md`](CHANGELOG.md).
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
