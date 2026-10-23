@@ -322,6 +322,28 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   check('anchor: a genuinely new task replaces the old goal', (sys[0]?.text || '').includes('second task'))
 }
 
+// ---------------------------------------------------------------- goal file + auto-continue
+{
+  const r = await rig()
+  await r.prompt('write the long report about solana wallets and verify each claim')
+  const p = path.join(r.root, '.omo', 'goal.md')
+  const g = fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : ''
+  check('goal file: the task is written to .omo/goal.md', g.includes('write the long report about solana'))
+  await r.prompt('продолжай')
+  const g2 = fs.readFileSync(p, 'utf8')
+  check('goal file: a nudge does not replace the goal', g2.includes('write the long report about solana') && /продолжай/.test(g2))
+}
+
+{
+  const r = await rig()
+  await r.prompt('build the geophoto report')
+  await r.emit('session.compaction.ended', {}, 1700)
+  check('auto-continue: one prompt after compaction', r.calls.prompt.length === 1, `prompts=${r.calls.prompt.length}`)
+  check('auto-continue: the prompt points at goal.md', String(r.calls.prompt[0] || '').includes('.omo/goal.md'))
+  await r.emit('session.compaction.ended', {}, 1700)
+  check('auto-continue: respects the 60 s cooldown', r.calls.prompt.length === 1)
+}
+
 // ---------------------------------------------------------------- retry, no switching
 {
   const r = await rig()

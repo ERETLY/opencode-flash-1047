@@ -10,7 +10,7 @@ const WIDE_PER_TOKEN = 2.0
 const PLUGIN_ID = 'omni-resilience'
 // Stamped into every `setup` log line, so "is the version I installed actually the version that
 // is running?" is answerable from the log instead of from the file hash.
-const VERSION = '1.4.0'
+const VERSION = '1.5.0'
 
 // Errors that neither a retry nor a resume prompt can fix: a wrong credential, a missing route or a
 // model id the gateway does not know. The old pattern `model.unavailable` matched exactly one
@@ -519,8 +519,10 @@ export default {
       const s = get(event.sessionID)
       if (!(await manage(event.sessionID, s))) return
       const text = event.prompt?.text || ''
-      // ignore our own resume messages; a real user message opens a new turn budget
-      if (!text.startsWith('The previous turn stopped unexpectedly')) {
+      // our own messages are not user intent: a resume nudge and the auto-continue prompt must not
+      // overwrite the goal or reset the turn budget
+      const internal = text.startsWith('The previous turn stopped unexpectedly') || text.startsWith('[omni-resilience]')
+      if (!internal) {
         const t = String(text || '').trim()
         s.lastPrompt = text
         if (t && isContinuation(t)) {
@@ -531,6 +533,17 @@ export default {
           s.goalAt = Date.now()
           s.lastInstruction = ''
         }
+        // The goal is a file, not a phrase list. Whatever the task is, it is written down once and
+        // the post-compaction anchor points at it; the summary can lose it, the file cannot.
+        try {
+          fs.mkdirSync(path.join(root, '.omo'), { recursive: true })
+          fs.writeFileSync(
+            path.join(root, '.omo', 'goal.md'),
+            `# Goal\n\n${s.goal || '(not set yet)'}\n\n## Last instruction\n\n${s.lastInstruction || '(none)'}\n\n---\n` +
+              `_Updated ${new Date().toISOString()} by omni-resilience (session ${event.sessionID}). ` +
+              `This file is the task contract after compaction - edit it freely._\n`,
+          )
+        } catch {}
         s.resumes = 0
         s.lastResumeAt = 0
         s.transportFails = 0
@@ -563,7 +576,7 @@ export default {
           (nudge && nudge !== goal
             ? `Their last instruction was only "${nudge}" - that means carry on with the task above. `
             : '') +
-          `Before anything else, read .omo/state.md and .omo/checkpoints/${event.sessionID}.json, then take the next unfinished step. ` +
+          `Before anything else, read .omo/goal.md and .omo/state.md, then take the next unfinished step. ` +
           `Do not restart the task, do not ask the user to repeat anything, and do not invent new work. ` +
           `If the summary disagrees with the task above, the task above wins.`
         event.system.push({ type: 'text', text })
@@ -1043,6 +1056,30 @@ export default {
               if (type === 'session.compaction.ended') {
                 s.anchor = { at: Date.now(), reason: 'compaction' }
                 s.anchorLeft = 2
+                // A summary ends the turn: OpenCode does not continue on its own. Send one short
+                // prompt so the model keeps working instead of waiting for the user to type
+                // "continue" and hope. Only into an idle session, at most 3 times, 60 s apart.
+                setTimeout(async () => {
+                  try {
+                    const st: any = await ctx.session.get({ sessionID: id })
+                    if (st?.status?.type !== 'idle') return
+                    const cur = get(id)
+                    if (!ours(cur)) return
+                    if (Date.now() - Number(cur.lastAutoContinue || 0) < 60000) return
+                    if (Number(cur.autoContinues || 0) >= 3) return
+                    cur.lastAutoContinue = Date.now()
+                    cur.autoContinues = Number(cur.autoContinues || 0) + 1
+                    await ctx.session.prompt({
+                      sessionID: id,
+                      text:
+                        '[omni-resilience] Continue the task now. Do not summarise and do not stop to ask. ' +
+                        'Read .omo/goal.md and .omo/state.md, then take the next unfinished step.',
+                    })
+                    log({ at: 'auto-continue', sessionID: id, attempt: cur.autoContinues })
+                  } catch (e: any) {
+                    log({ at: 'auto-continue-error', sessionID: event.sessionID, error: String(e?.message || e) })
+                  }
+                }, 1500)
               }
               await writeCheckpoint(id, type.endsWith('failed') ? 'compaction-failed' : 'post-compaction')
             } else if (type === 'session.idle') {
