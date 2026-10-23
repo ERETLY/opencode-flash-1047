@@ -61,7 +61,8 @@
         "every": 20,
         "stallMs": 900000,
         "maxResumes": 4,
-        "resumeCooldownMs": 120000
+        "resumeCooldownMs": 120000,
+        "maxTransportFails": 7
       }
     }
   ]

@@ -10,7 +10,7 @@ const WIDE_PER_TOKEN = 2.0
 const PLUGIN_ID = 'omni-resilience'
 // Stamped into every `setup` log line, so "is the version I installed actually the version that
 // is running?" is answerable from the log instead of from the file hash.
-const VERSION = '1.3.4'
+const VERSION = '1.3.5'
 
 // Errors that neither a retry nor a resume prompt can fix: a wrong credential, a missing route or a
 // model id the gateway does not know. The old pattern `model.unavailable` matched exactly one
@@ -37,6 +37,11 @@ const DEFAULTS = {
   stallMs: 900000,
   maxResumes: 4,
   resumeCooldownMs: 120000,
+  // A transport failure is a dead stream, not a dead endpoint: retrying is cheap and usually
+  // works. Six attempts cover the free gateway's normal behaviour (it often dies 2-4 times in a
+  // row and then answers); by the seventh the gateway is not blipping, it is down or the request
+  // is too long to survive, so let the failure path surface it instead of hiding it.
+  maxTransportFails: 7,
   keepRecent: 12,
   // prune only once the session is genuinely large; eliding tool output at 55% threw away
   // file contents while there was still 140k tokens of room
@@ -143,6 +148,7 @@ export default {
       stallMs: Number(opts.stallMs ?? DEFAULTS.stallMs),
       maxResumes: Number(opts.maxResumes ?? DEFAULTS.maxResumes),
       resumeCooldownMs: Number(opts.resumeCooldownMs ?? DEFAULTS.resumeCooldownMs),
+      maxTransportFails: Number(opts.maxTransportFails ?? DEFAULTS.maxTransportFails),
       keepRecent: Number(opts.keepRecent ?? DEFAULTS.keepRecent),
       pruneSoft: Number(opts.pruneSoft ?? DEFAULTS.pruneSoft),
       keep: Number(opts.keep ?? DEFAULTS.keep),
@@ -862,8 +868,9 @@ export default {
         if (s.transportFails === 2) s.forcePrune = true
         log({ at: 'transport-fail', sessionID: event.sessionID, count: s.transportFails, status, message: msg.slice(0, 160) })
         // a stream that keeps dying mid-flight will not heal by retrying forever:
-        // give up fast and let the failure path (resume/compaction) take over
-        if (s.transportFails > 5) {
+        // six attempts cover a normal blip, the seventh means the gateway is down or the request
+        // is too big to survive, so let the failure path (resume/compaction) take over
+        if (s.transportFails >= CFG.maxTransportFails) {
           log({ at: 'retry-giveup', sessionID: event.sessionID, count: s.transportFails })
           s.retryGiveup = now
           s.transportFails = 0
@@ -1102,6 +1109,7 @@ export default {
       keepFloor: Math.max(18000, CFG.keep + 3000),
       stallMs: CFG.stallMs,
       maxResumes: CFG.maxResumes,
+      maxTransportFails: CFG.maxTransportFails,
       modelSwitching: 'disabled',
       estimator: `${ASCII_PER_TOKEN} ascii/char, ${WIDE_PER_TOKEN} wide/char, calibrated`,
     })

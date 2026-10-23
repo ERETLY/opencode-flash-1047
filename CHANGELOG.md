@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.3.5 – 2026-10-23
+
+Tuning, based on the live log.
+
+### Changed
+
+- **A transport failure is retried seven times, not five.** The free gateway routinely dies two to
+  four times in a row and then answers: the 2026-10-23 session recovered on the 4th attempt, and the
+  old cap of five left almost no headroom. Six attempts are normal, the seventh means the gateway is
+  down or the request is too long to survive - at that point the failure path (resume/compaction)
+  takes over instead of hiding it behind more retries.
+- **`maxTransportFails` is now an option** (default `7`), and it is stamped into the `setup` log
+  line, so the limit is visible without reading the source.
+
+### Tests
+
+82 assertions (was 81). The sixth failure must still retry, the seventh must give up.
+
 ## v1.3.4 – 2026-10-23
 
 Found in the live message store, not in a test.

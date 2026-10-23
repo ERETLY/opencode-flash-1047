@@ -327,7 +327,9 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   for (let i = 0; i < 6; i++) {
     last = await r2.retry({ status: 200, type: 'provider.transport', message: 'ECONNRESET' }, i + 1)
   }
-  check('retry transport: gives up after 5 resets instead of hanging', last.decision === undefined)
+  check('retry transport: the sixth failure still retries', last.decision?.retry === true, `delay=${last.decision?.delay}`)
+  last = await r2.retry({ status: 200, type: 'provider.transport', message: 'ECONNRESET' }, 7)
+  check('retry transport: gives up on the seventh instead of hanging', last.decision === undefined)
 }
 
 // ---------------------------------------------------------------- resume
