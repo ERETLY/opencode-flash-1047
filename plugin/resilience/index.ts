@@ -10,7 +10,7 @@ const WIDE_PER_TOKEN = 2.0
 const PLUGIN_ID = 'omni-resilience'
 // Stamped into every `setup` log line, so "is the version I installed actually the version that
 // is running?" is answerable from the log instead of from the file hash.
-const VERSION = '1.6.0'
+const VERSION = '1.6.1'
 
 // Errors that neither a retry nor a resume prompt can fix: a wrong credential, a missing route or a
 // model id the gateway does not know. The old pattern `model.unavailable` matched exactly one
@@ -539,6 +539,9 @@ export default {
           s.goal = t.slice(0, 1200)
           s.goalAt = Date.now()
           s.lastInstruction = ''
+          // Keep the user's own words, not a paraphrase: after compaction the summary is the only
+          // history left, so the requirements live in goal.md as well.
+          s.asks = [...(Array.isArray(s.asks) ? s.asks : []), t.slice(0, 600)].slice(-4)
         }
         // The goal is a file, not a phrase list. Whatever the task is, it is written down once and
         // the post-compaction anchor points at it; the summary can lose it, the file cannot.
@@ -546,7 +549,10 @@ export default {
           fs.mkdirSync(path.join(root, '.omo'), { recursive: true })
           fs.writeFileSync(
             path.join(root, '.omo', 'goal.md'),
-            `# Goal\n\n${s.goal || '(not set yet)'}\n\n## Last instruction\n\n${s.lastInstruction || '(none)'}\n\n---\n` +
+            `# Goal\n\n${s.goal || '(not set yet)'}\n\n` +
+              `## Requirements (the user's own words, oldest first)\n\n` +
+              `${(Array.isArray(s.asks) && s.asks.length ? s.asks : []).map((a: string, i: number) => `${i + 1}. ${a}`).join('\n') || '(none yet)'}\n\n` +
+              `## Last instruction\n\n${s.lastInstruction || '(none)'}\n\n---\n` +
               `_Updated ${new Date().toISOString()} by omni-resilience (session ${event.sessionID}). ` +
               `This file is the task contract after compaction - edit it freely._\n`,
           )
@@ -787,17 +793,17 @@ export default {
       if (ratio >= CFG.hard) {
         warn(
           'hard',
-          `[omni-resilience] Automatic note, not from the user. Context ${pct}% full. Before replying: append the current goal, findings, and next steps to .omo/state.md, then compact. Do not start new work in this turn. Keep working on the user's current task.`,
+          `[omni-resilience] Automatic note, not from the user. Context ${pct}% full. Close only the current step and write concrete state to .omo/state.md: files and paths, decisions, open TODOs, next step. Compaction follows immediately. Do not start new work in this turn and do not drop the task.`,
         )
       } else if (ratio >= CFG.compact) {
         warn(
           'compact',
-          `[omni-resilience] Automatic note, not from the user. Context ${pct}% full. Finish the current step, persist operational state to .omo/state.md, and expect compaction. Do not re-read large files. Keep working on the user's current task.`,
+          `[omni-resilience] Automatic note, not from the user. Context ${pct}% full. Keep the same quality bar: verify claims before writing them and do not skip steps because the context is filling up. Write concrete findings to .omo/state.md - exact paths, line numbers, symbol names, decisions, next step - because a summary is about to replace the history and it must carry them. If you need an old file again, read a range (grep, offset/limit) instead of the whole file.`,
         )
       } else if (ratio >= CFG.warn) {
         warn(
           'warn',
-          `[omni-resilience] Automatic note, not from the user. Context ${pct}% full. Keep replies short, avoid re-reading large files, and record findings in .omo/state.md. Keep working on the user's current task.`,
+          `[omni-resilience] Automatic note, not from the user. Context ${pct}% full. Work at full quality: do not shorten answers, do not skip verification and do not skip steps because the context is filling up. Prefer targeted reads (grep, offset/limit) over re-reading whole files, and record findings - paths, line numbers, decisions, next step - in .omo/state.md so they survive compaction.`,
         )
       }
 
@@ -870,10 +876,18 @@ export default {
       const task = String(s.goal || s.lastPrompt || '').trim().slice(0, 1500)
       const recent = (s.recent || []).slice(-6).join(', ') || 'none'
 
-      // Pull the hard facts out of the transcript itself: a summariser that knows which files
-      // were touched and which step was last visible produces a much more usable summary than
-      // one that only gets a tool counter.
-      const facts = { files: [] as string[], tools: [] as string[], lastStep: '' }
+      // Pull the hard facts out of the transcript itself: a summariser that is handed the user's
+      // exact words, the files, the commands and the errors keeps them in the summary. One that
+      // only gets a tool counter paraphrases the request into something generic, which is exactly
+      // how "он не помнит, как именно я просил" happens between compactions.
+      const facts = {
+        files: [] as string[],
+        tools: [] as string[],
+        lastStep: '',
+        asks: [] as string[],
+        commands: [] as string[],
+        errors: [] as string[],
+      }
       try {
         const msgs = Array.isArray(event.messages) ? event.messages : []
         let last = ''
@@ -888,28 +902,68 @@ export default {
               const args = p.input || p.args || p.arguments
               if (args && typeof args === 'object') {
                 const pth = args.filePath || args.path || args.file || args.filename || args.target
-                if (typeof pth === 'string' && pth && !facts.files.includes(pth)) facts.files.push(pth)
+                if (typeof pth === 'string' && pth) {
+                  const from = [args.offset, args.startLine, args.start].find((v: any) => Number.isFinite(Number(v)))
+                  const to = [args.limit, args.endLine, args.end].find((v: any) => Number.isFinite(Number(v)))
+                  const ref =
+                    from !== undefined
+                      ? `${pth}:${from}${to !== undefined ? '-' + (Number(from) + Number(to) - 1) : ''}`
+                      : pth
+                  if (!facts.files.includes(ref)) facts.files.push(ref)
+                }
+                const cmd = args.command || args.cmd
+                if (typeof cmd === 'string' && cmd.trim() && !facts.commands.includes(cmd.trim())) {
+                  facts.commands.push(cmd.trim().slice(0, 180))
+                }
               }
             }
             if (p.type === 'text' && role === 'assistant' && String(p.text || '').trim()) {
               last = String(p.text).trim()
             }
+            if (p.type === 'tool-result' && typeof p?.result?.value === 'string') {
+              const line = String(p.result.value)
+                .slice(0, 20000)
+                .split(/\r?\n/)
+                .find((l: string) => /error|failed|exception|cannot|not found|traceback/i.test(l))
+              if (line && !facts.errors.includes(line.trim())) facts.errors.push(line.trim().slice(0, 180))
+            }
+          }
+          // The user's own words are the requirements. A summary that paraphrases them loses what
+          // was actually asked for, so the last few are carried verbatim.
+          if (role === 'user') {
+            const text = m.content
+              .filter((p: any) => p?.type === 'text')
+              .map((p: any) => String(p.text || ''))
+              .join('\n')
+              .trim()
+            if (text && !/^\[omni-resilience\]/.test(text)) facts.asks.push(text.slice(0, 500))
           }
         }
         facts.lastStep = last.slice(0, 700)
-        facts.files = facts.files.slice(-8)
+        facts.files = facts.files.slice(-10)
         facts.tools = facts.tools.slice(-8)
+        facts.asks = facts.asks.slice(-4)
+        facts.commands = facts.commands.slice(-5)
+        facts.errors = facts.errors.slice(-3)
       } catch {}
 
       const note =
         `[omni-resilience] Facts that MUST survive this compaction (session ${event.sessionID}). ` +
         (task ? `The user's request, verbatim: "${task}". ` : '') +
+        (facts.asks.length
+          ? `The user's own words, in order (these ARE the requirements): ${facts.asks.map((a) => `"${a}"`).join(' | ')}. `
+          : '') +
         `Work done so far: ${s.toolCount} tool calls; recent tools: ${recent}; last tool: ${s.lastTool}. ` +
         (facts.tools.length ? `Tools used: ${facts.tools.join(', ')}. ` : '') +
-        (facts.files.length ? `Files touched: ${facts.files.join(', ')}. ` : '') +
+        (facts.files.length ? `Files touched (exact paths, with line ranges where known): ${facts.files.join(', ')}. ` : '') +
+        (facts.commands.length ? `Commands run: ${facts.commands.map((c) => '`' + c + '`').join('; ')}. ` : '') +
+        (facts.errors.length ? `Errors seen verbatim: ${facts.errors.map((e) => `"${e}"`).join('; ')}. ` : '') +
         (facts.lastStep ? `Last visible step: "${facts.lastStep}". ` : '') +
+        `When you write the summary you MUST keep, word for word: the user's requirements above, every file path and line ` +
+        `number, every symbol/function/table name, the commands and their outcomes, the error messages, the decisions with ` +
+        `their reason, the open TODOs and the next concrete step. Do not paraphrase the user's requirements and do not ` +
+        `replace concrete paths with descriptions like "the config file". ` +
         `Checkpoint: .omo/checkpoints/${event.sessionID}.json. ` +
-        `Preserve the request and these facts verbatim in the summary - never summarise the request away.` +
         (stateText ? `\n\nCurrent .omo/state.md:\n${stateText}` : '')
       try {
         const msgs = event.messages

@@ -270,7 +270,7 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   check('compaction: existing messages are byte-identical (regression: tool-message mutation)', JSON.stringify(msgs.slice(0, count)) === before)
   check('compaction: note quotes the user task', msgs[count].content[0].text.includes('fix the crypto checker'))
   check('compaction: note carries the recent tool trace', msgs[count].content[0].text.includes('recent tools: shell'))
-  check('compaction: note forbids summarising the request away', /never summarise the request away/i.test(msgs[count].content[0].text))
+  check('compaction: note forbids paraphrasing the request', /Do not paraphrase the user's requirements/i.test(msgs[count].content[0].text))
 
   // the transcript itself is the source of truth for files / tools / the last visible step
   const r2 = await rig()
@@ -281,6 +281,7 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
       role: 'assistant',
       content: [
         { type: 'tool-call', name: 'read', input: { filePath: 'C:/repo/src/crypto.ts' } },
+        { type: 'tool-call', name: 'read', input: { filePath: 'C:/repo/src/verify.ts', offset: 10, limit: 20 } },
         { type: 'tool-call', name: 'shell', input: { command: 'npm test' } },
         { type: 'text', text: 'the handler drops the nonce, fixing it now' },
       ],
@@ -291,6 +292,10 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   const note2 = msgs2.at(-1).content[0].text
   check('compaction: note carries files touched', note2.includes('src/crypto.ts'), note2.slice(0, 300))
   check('compaction: note carries the last visible step', note2.includes('drops the nonce'), note2.slice(0, 300))
+  check('compaction: note carries the line range of a ranged read', note2.includes('src/verify.ts:10-29'), note2.slice(0, 300))
+  check('compaction: note carries commands verbatim', note2.includes('npm test'), note2.slice(0, 300))
+  check('compaction: note carries the user\'s own words as requirements', /user's own words/i.test(note2) && note2.includes('"fix the crypto checker"'), note2.slice(0, 300))
+  check('compaction: note tells the summariser what must not be lost', /file path and line/i.test(note2) && /symbol\/function\/table name/i.test(note2))
 }
 
 // ---------------------------------------------------------------- post-compaction anchor
@@ -343,6 +348,13 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   await r.prompt('продолжай')
   const g2 = fs.readFileSync(p, 'utf8')
   check('goal file: a nudge does not replace the goal', g2.includes('write the long report about solana') && /продолжай/.test(g2))
+  await r.prompt('only check wallets above 1000 usd and cite the source for every claim')
+  const g3 = fs.readFileSync(p, 'utf8')
+  check(
+    'goal file: requirements keep every ask verbatim',
+    g3.includes('write the long report about solana') && g3.includes('only check wallets above 1000'),
+    g3.split('\n').slice(0, 8).join(' / '),
+  )
 }
 
 {

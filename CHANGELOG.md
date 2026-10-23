@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.6.1 – 2026-10-23
+
+The two things that made the model look dumber in long chats.
+
+### Fixed
+
+- **The pressure notes were suppressing quality.** At 70% they said "Keep replies short, avoid
+  re-reading large files" and at 85% "Finish the current step ... Do not re-read large files". That
+  is a direct instruction to stop verifying - and it was attached to every request above the
+  threshold. Rewritten: work at full quality, do not shorten answers, do not skip steps, prefer
+  targeted reads (grep, offset/limit) over whole files, and write concrete findings to
+  `.omo/state.md`.
+- **The compaction note now carries the specifics a summary used to lose.** It mines the transcript
+  for the user's own words (up to four messages, verbatim), file paths with line ranges taken from
+  ranged reads, the exact commands, and the error lines, then tells the summariser: keep every path,
+  line number, symbol/function/table name, command and outcome, error message, decision with its
+  reason, open TODO and the next step, and **do not paraphrase the user's requirements**.
+- **`goal.md` keeps the requirements too.** Every substantive user message is appended (last four,
+  verbatim) under `## Requirements`, so even a summary that drops them leaves the file intact.
+
+### Tests
+
+103 assertions (was 98): the note carries the user's own words, a ranged read as `file:from-to`,
+commands verbatim, the anti-paraphrase instruction, and the noise-free wording checks.
+
 ## v1.6.0 – 2026-10-23
 
 Compaction that cannot succeed must not be retried forever, and the session must survive without it.
