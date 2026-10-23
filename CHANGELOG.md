@@ -1,5 +1,32 @@
 # Changelog
 
+## v1.4.0 – 2026-10-23
+
+The post-compaction drift, fixed at its source.
+
+### Fixed
+
+- **The anchor quoted the last message, not the task.** After compaction the plugin injected
+  "your current task, verbatim: ..." using `lastPrompt`. If the user's last message was
+  **"продолжай"**, the model was told its task was the word "продолжай" - the summary had already
+  dropped everything else, so it had nothing to continue and invented work. The plugin now keeps a
+  separate `goal`: the last *substantive* user message. A nudge (`продолжай`, `дальше`, `continue`,
+  `go on`, ...) is stored as `lastInstruction` and never replaces the goal.
+- **The anchor now states which one wins.** "The user's task, verbatim: ... Their last instruction
+  was only "продолжай" - that means carry on with the task above. ... If the summary disagrees with
+  the task above, the task above wins." A compaction summary that describes the nudge can no longer
+  redefine the goal.
+- **The anchor repeats for one more request.** It used to be injected exactly once; if the first
+  post-compaction turn was spent on a tool call that failed, the guidance was gone. It is now sent
+  on the first two requests and then stops.
+- `goal` is also used by the compaction note, the resume prompt and the checkpoint file, so all
+  three quote the real task.
+
+### Tests
+
+86 assertions (was 82). New: the anchor survives a "продолжай" and names the nudge as a nudge; a
+genuinely new task replaces the goal; the anchor repeats once and then stops.
+
 ## v1.3.5 – 2026-10-23
 
 Tuning, based on the live log.

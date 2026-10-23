@@ -10,7 +10,7 @@ const WIDE_PER_TOKEN = 2.0
 const PLUGIN_ID = 'omni-resilience'
 // Stamped into every `setup` log line, so "is the version I installed actually the version that
 // is running?" is answerable from the log instead of from the file hash.
-const VERSION = '1.3.5'
+const VERSION = '1.4.0'
 
 // Errors that neither a retry nor a resume prompt can fix: a wrong credential, a missing route or a
 // model id the gateway does not know. The old pattern `model.unavailable` matched exactly one
@@ -133,6 +133,19 @@ const stripPressureNotes = (messages: any[]): number => {
   return removed
 }
 
+// A nudge is not a task. After compaction the anchor quotes the user's goal; if the last thing
+// they typed was "продолжай", quoting that would leave the model with nothing to continue - which
+// is exactly the "it forgot what it was doing" failure. Only a whole-string match counts, so
+// "делай рефакторинг модуля" stays a real task.
+const CONTINUE_RE =
+  /^(?:(?:ok|okay|да|ну)[,.! ]*)?(?:продолжай|продолжи|продолжаем|продолжить|дальше|давай дальше|погнали|жми|делай дальше|го|continue|go on|keep going|resume|carry on|next|proceed)(?:[,.! ]*(?:дальше|please|пж|плиз))?[.!? ]*$/i
+const isContinuation = (t: string): boolean => {
+  const s = String(t || '').trim()
+  if (!s) return true
+  if (s.length > 80) return false
+  return CONTINUE_RE.test(s)
+}
+
 export default {
   id: PLUGIN_ID,
   async setup(ctx: any) {
@@ -219,6 +232,9 @@ export default {
           modelLookup: 0,
           recent: [],
           anchor: null,
+          anchorLeft: 0,
+          goal: '',
+          lastInstruction: '',
           cal: 1.18, // measured default: real prompt tokens / estimate on this endpoint
           calN: 0,
           prevEst: 0,
@@ -291,6 +307,7 @@ export default {
           toolCallCount: s.toolCount,
           lastToolName: s.lastTool,
           lastUserPrompt: String(s.lastPrompt || '').slice(0, 4000),
+          goal: String(s.goal || '').slice(0, 1200),
           estimatedTokens: s.estimatedTokens,
           contextLimit: s.contextLimit,
           prunedChars: s.prunedChars,
@@ -463,7 +480,7 @@ export default {
       log({ at: 'resume', sessionID, reason, attempt: s.resumes })
       await new Promise((r) => setTimeout(r, 2000))
       try {
-        const task = String(s.lastPrompt || '').trim().slice(0, 500)
+        const task = String(s.goal || s.lastPrompt || '').trim().slice(0, 500)
         await ctx.session.prompt({
           sessionID,
           text:
@@ -504,7 +521,16 @@ export default {
       const text = event.prompt?.text || ''
       // ignore our own resume messages; a real user message opens a new turn budget
       if (!text.startsWith('The previous turn stopped unexpectedly')) {
+        const t = String(text || '').trim()
         s.lastPrompt = text
+        if (t && isContinuation(t)) {
+          // a nudge: keep the goal, remember what was asked on top of it
+          s.lastInstruction = t.slice(0, 200)
+        } else if (t) {
+          s.goal = t.slice(0, 1200)
+          s.goalAt = Date.now()
+          s.lastInstruction = ''
+        }
         s.resumes = 0
         s.lastResumeAt = 0
         s.transportFails = 0
@@ -529,17 +555,21 @@ export default {
       // tends to drift into invented work right after it, so the first request after a
       // successful compaction gets the user's task quoted back, once.
       if (s.anchor) {
-        const task = String(s.lastPrompt || '').trim().slice(0, 600)
+        const goal = String(s.goal || s.lastPrompt || '').trim().slice(0, 800)
+        const nudge = String(s.lastInstruction || '').trim().slice(0, 200)
         const text =
-          `[omni-resilience] The conversation was just compacted; earlier turns now exist only as a summary. ` +
-          (task
-            ? `Your current task, verbatim from the user: "${task}". `
-            : `Your current task is in the summary. `) +
-          `Continue it from .omo/state.md and .omo/checkpoints/${event.sessionID}.json. ` +
-          `Do not restart the task, do not ask the user to repeat anything, and do not invent new work.`
+          `[omni-resilience] The conversation was just compacted; earlier turns exist only as a summary. ` +
+          (goal ? `The user's task, verbatim: "${goal}". ` : `Your task is in the summary. `) +
+          (nudge && nudge !== goal
+            ? `Their last instruction was only "${nudge}" - that means carry on with the task above. `
+            : '') +
+          `Before anything else, read .omo/state.md and .omo/checkpoints/${event.sessionID}.json, then take the next unfinished step. ` +
+          `Do not restart the task, do not ask the user to repeat anything, and do not invent new work. ` +
+          `If the summary disagrees with the task above, the task above wins.`
         event.system.push({ type: 'text', text })
-        s.anchor = null
-        log({ at: 'anchor', sessionID: event.sessionID, reason: 'post-compaction', task: task.length })
+        s.anchorLeft = Number(s.anchorLeft || 1) - 1
+        s.anchor = s.anchorLeft > 0 ? { at: Date.now(), reason: 'compaction', repeat: true } : null
+        log({ at: 'anchor', sessionID: event.sessionID, reason: 'post-compaction', task: goal.slice(0, 80), left: Math.max(0, s.anchorLeft) })
       }
 
       // No protocol injection here: OpenCode already puts instructions/long-session.md into the
@@ -739,7 +769,7 @@ export default {
       try {
         stateText = fs.readFileSync(path.join(root, '.omo', 'state.md'), 'utf8').slice(0, 2500)
       } catch {}
-      const task = String(s.lastPrompt || '').trim().slice(0, 1500)
+      const task = String(s.goal || s.lastPrompt || '').trim().slice(0, 1500)
       const recent = (s.recent || []).slice(-6).join(', ') || 'none'
 
       // Pull the hard facts out of the transcript itself: a summariser that knows which files
@@ -1010,7 +1040,10 @@ export default {
               s.marks = {}
               // re-anchor the model on the next request: compaction moves the conversation into a
               // summary, which is exactly where agents drift into invented work
-              if (type === 'session.compaction.ended') s.anchor = { at: Date.now(), reason: 'compaction' }
+              if (type === 'session.compaction.ended') {
+                s.anchor = { at: Date.now(), reason: 'compaction' }
+                s.anchorLeft = 2
+              }
               await writeCheckpoint(id, type.endsWith('failed') ? 'compaction-failed' : 'post-compaction')
             } else if (type === 'session.idle') {
               s.busy = false

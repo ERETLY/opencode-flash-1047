@@ -294,7 +294,32 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   check('anchor: forbids restarting and inventing work', /do not restart/i.test(system[0]?.text || '') && /do not invent new work/i.test(system[0]?.text || ''))
   const system2 = []
   await r.context([], system2)
-  check('anchor: injected only once', system2.length === 0)
+  check('anchor: repeats on the next request, then stops', system2.length === 1)
+  const system3 = []
+  await r.context([], system3)
+  check('anchor: gone after the repeat', system3.length === 0)
+}
+
+// ---------------------------------------------------------------- goal survives a nudge
+{
+  const r = await rig()
+  await r.prompt('build the geophoto report for wallet 7xKq and verify every claim before writing')
+  await r.prompt('продолжай')
+  await r.emit('session.compaction.ended')
+  const sys = []
+  await r.context([], sys)
+  const t = sys[0]?.text || ''
+  check('anchor: quotes the original task after a "продолжай"', t.includes('build the geophoto report'))
+  check('anchor: calls the nudge a nudge, not the task', /last instruction was only "продолжай"/.test(t))
+}
+{
+  const r = await rig()
+  await r.prompt('first task: collect every address from the log file')
+  await r.prompt('second task: now write the report in russian with sources')
+  await r.emit('session.compaction.ended')
+  const sys = []
+  await r.context([], sys)
+  check('anchor: a genuinely new task replaces the old goal', (sys[0]?.text || '').includes('second task'))
 }
 
 // ---------------------------------------------------------------- retry, no switching
