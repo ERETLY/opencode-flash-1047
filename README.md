@@ -128,6 +128,11 @@ Two practical notes:
 Requirements: OpenCode 2.x. The installers use Node.js or Python **only if present**; the manual path
 needs neither.
 
+```bash
+git clone https://github.com/ERETLY/opencode-flash-1047.git
+cd opencode-flash-1047
+```
+
 ```powershell
 # Windows
 powershell -ExecutionPolicy Bypass -File .\install.ps1
