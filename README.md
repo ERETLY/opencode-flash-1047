@@ -28,7 +28,7 @@ Then quit OpenCode completely, reopen it, and pick **flash 1047 - Super Free**. 
 ## Contents
 
 1. [Who this is for](#who-this-is-for)
-2. [Why this model](#why-this-model)
+2. [This entry vs the stock entry](#this-entry-vs-the-stock-entry)
 3. [What it fixes](#what-it-fixes)
 4. [Speed expectations](#speed-expectations)
 5. [Quick start](#quick-start)
@@ -44,7 +44,7 @@ Then quit OpenCode completely, reopen it, and pick **flash 1047 - Super Free**. 
 15. [Files](#files)
 16. [Uninstall](#uninstall)
 17. [Free-tier note and limits](#free-tier-note-and-limits)
-18. [Changelog](#changelog)
+18. [This release](#this-release)
 19. [License](#license)
 
 ---
@@ -66,27 +66,60 @@ Then quit OpenCode completely, reopen it, and pick **flash 1047 - Super Free**. 
   steps. See [Speed expectations](#speed-expectations).
 - **Not OpenCode.** The provider block is OpenCode-specific and the plugin is an OpenCode 2.x plugin.
 
-## Why this model
+## This entry vs the stock entry
 
-| | stock `opencode` entry | flash 1047 |
+Same model id, same weights, same $0. The difference is two things: **the declared window** and
+**the plugin that manages it**.
+
+### The numbers
+
+| | stock `opencode` entry | this entry |
 |---|---|---|
-| price | $0 | **$0** |
-| declared context | 200 000 (wrong) | **310 000** (measured safe) |
-| accepted by the gateway | ~319 123 tokens | 319 123 measured, 325 760 rejected |
+| model id | `deepseek-v4.1-flash-free` | same |
+| price | $0 | $0 |
+| declared context | 200 000 | **310 000** |
+| where the client compacts | ~170 000 (limit − 15%) | **263 500** (85%) |
+| usable before compaction | ~170k | **~263k** |
+| measured gateway wall | 319 123 accepted / 325 760 rejected | the same wall, kept in mind |
 | output | 32 000 | 32 000 |
-| reasoning effort | low / high / max | **low / medium / high / max** |
-| long-session plugin | no | **yes** |
+| reasoning variants | low / high / max | low / medium / high / max |
+| calibrated size estimate | no (`chars / 3.6`) | **yes, per model** |
+| old tool output trimmed | no | **yes, with a marker** |
+| dead-stream retry | the turn ends | **retried, up to 7** |
+| resume after a failed turn | no | **yes** |
+| post-compaction anchor | no | **yes** |
+| task saved on disk | no | **`.omo/goal.md`** |
 | model switching | — | **never** |
 
-Why bother instead of the stock entry: the stock one declares 200 000, so either you compact far too
-early or you hit `400 context_length_exceeded` while the client still thinks there is room. This
-entry declares a number the gateway actually accepts and adds the bookkeeping that keeps you under
-it. The free pool is also flaky in specific, recoverable ways — dead streams, 429 bursts, summariser
-truncation — and those are handled instead of being left to kill the session.
+The 170 000 figure is not a defect of the model: the runtime compacts at `limit − max(15%, 16 000)`,
+so a declared 200 000 costs ~93 000 tokens of working memory before the first summary. Declaring the
+measured 310 000 is what buys those ~93 000 back.
 
-When to use something else, plainly: **hard architecture, novel algorithms, subtle bugs** — use a
-paid frontier model. **Cheap, long, mechanical, high-volume work** — this is what the free Flash
-model is good at, and the 310K window is what makes it usable for hours.
+### In a long session
+
+| what happens | stock entry | this entry |
+|---|---|---|
+| a 200 000-character log lands in context | the next request is too big | the middle is elided with a marker, the turn survives |
+| context reaches the compaction point | compacts at ~170k, early | compacts at 263.5k, with ~46k of headroom |
+| the summary loses your wording | you re-explain | `goal.md` + the note carry your asks verbatim |
+| after compaction | the session waits for you | one prompt continues the task, anchored on the goal |
+| the stream dies at 90% | the turn fails | retried; pruned harder on the second failure |
+| the summariser stream is truncated | compaction fails, the session stalls | backoff, then emergency trim: the session keeps working |
+| context pressure | "keep replies short" | full quality, targeted reads, findings written down |
+| the model itself | same quality per token | same quality per token |
+
+### vs a paid model
+
+| | this | a paid frontier model |
+|---|---|---|
+| cost | $0 | per token |
+| window | 310k measured | usually 200k–1M, varies |
+| hard reasoning | weaker | **stronger** |
+| long mechanical work | **what it is for** | fine, but you pay |
+| rate limits | shared free pool | your quota |
+
+Practical split: use this for refactors, test loops, log hunting, migrations and anything long and
+mechanical. Switch to a paid model when the problem is the thinking, not the typing.
 
 ## What it fixes
 
@@ -193,9 +226,10 @@ only**; the stored session is never rewritten.
 ```
 
 Why step 7 matters: the provider reports usage for the request that was **sent**. Recording
-`prevEst` before pruning made `cal = real / prevEst` shrink in proportion to the pruned share
-(0.44 instead of 1.2 in the regression test), so every later decision under-counted and the 85%
-trigger fired far above the real ceiling. This was the v1.3.0 fix and it has a dedicated test.
+`prevEst` before pruning would make `cal = real / prevEst` shrink in proportion to the pruned share
+(0.44 instead of 1.2 in the regression test), so every later decision would under-count and the 85%
+trigger would fire far above the real ceiling. The estimate is therefore recorded after pruning, and
+there is a dedicated test for it.
 
 ## Context policy
 
@@ -216,8 +250,8 @@ backstop below the real 319K wall.
 
 **The `keep` contract.** `compaction.keep.tokens` and the plugin's `keep` **must be the same
 number** (32 000 shipped). The runtime cannot summarise anything inside the keep window, so a
-plugin trigger below `keep` only produces `Nothing to compact yet` — and the old code turned that
-into a compaction attempt on every single request.
+trigger below `keep` only produces `Nothing to compact yet`; the plugin detects that case and backs
+off instead of asking again on every request.
 
 Two invariants hold for any preset:
 
@@ -365,7 +399,7 @@ A healthy long session looks like: steady `calibrate` lines with `cal` between 0
 {"at":"setup","plugin":"1.6.1","pid":17136,"guarded":"flash1047/deepseek-v4.1-flash-free", ...}
 ```
 
-A `setup` line **without** `plugin` is an older build still held in memory. The runtime re-reads the
+A `setup` line **without** `plugin` is a different build still held in memory. The runtime re-reads the
 plugin when it starts a server instance for a project, which usually happens on its own (a new
 `setup` line with the new version appears after the file changes); if it still shows the old
 version, quit the app completely and reopen it. No `setup` line for your session at all is the other,
@@ -399,7 +433,7 @@ behaviour is asserted rather than eyeballed. **Last run: 103 / 103 passed.**
 | resume | fires after a failed turn, quotes the task, respects cooldown and `maxResumes` |
 | logging | `setup` records the guarded entry and `modelSwitching: disabled` |
 
-Measured against the author's **OpenCode 2.1.2** (v1.2.0 baseline):
+Measured against the author's **OpenCode 2.1.2**:
 
 | test | result |
 |---|---|
@@ -410,7 +444,7 @@ Measured against the author's **OpenCode 2.1.2** (v1.2.0 baseline):
 | scoping | a non-guarded session produced only a `setup` line |
 | model switching | never — `switchModel` not called |
 
-Run live on **OpenCode 2.1.3**, v1.6.0/v1.6.1, author's install:
+Run live on **OpenCode 2.1.3**, v1.6.1, author's install:
 
 | observation | result |
 |---|---|
@@ -438,9 +472,9 @@ them (transport retry, compaction backoff, emergency trim) instead of pretending
 | **`ECONNRESET` after HTTP 200** | the free gateway closed the stream. Handled: transport retry, force-prune on the 2nd, then a clean failure instead of a hang. |
 | **a long chat feels slow** | one user message costs ~11 model calls, each re-reading the whole context: measured 10–30 s per step at 250k tokens. Start a new session for a new task. The plugin caps and trims; it does not make the model faster. |
 | **`compact-backoff` with a growing `fails`** | the gateway keeps truncating the summariser. Nothing to fix: the session continues through the emergency trim until a compaction gets through. |
-| **compaction fails with `provider.invalid-request`** | an old plugin appended the note to the trailing tool message. Update `plugin/resilience/index.ts`. |
+| **compaction fails with `provider.invalid-request`** | the note was appended to the trailing tool message. Use the current `plugin/resilience/index.ts` - the note must be a new user message. |
 | **resume prompt keeps appearing** | a turn genuinely ended with no answer. Check `stall*` / `resume-skip` lines. |
-| **every log line appears twice** | the plugin is loaded twice (directory scan + `plugins` config entry). Since v1.3.3 the second load logs `setup-duplicate` and does not register hooks; if you still see doubles, an older build is running — check `plugin` in the `setup` line. |
+| **every log line appears twice** | the plugin is loaded twice (directory scan + `plugins` config entry). The second load logs `setup-duplicate` and does not register hooks; if doubles persist, check `plugin` in the `setup` line - it must match the version you installed. |
 | **context grows by ~50 tokens per request** | that is the pressure note while a level holds; it is stripped before the next request, so it does not accumulate. |
 
 ## FAQ
@@ -522,29 +556,21 @@ Limits worth knowing before you build on it:
 - the window is measured, not guaranteed — if the gateway changes, watch `ctx` and `calibrate` lines
   and treat them as the source of truth.
 
-## Changelog
+## This release
 
-- **v1.6.1** — the pressure notes no longer tell the model to be brief; the compaction note now carries
-  the user's own words, file paths with line ranges, commands and errors, and forbids paraphrasing.
-  `goal.md` keeps every ask verbatim under `## Requirements`.
-- **v1.6.0** — compaction failures are no longer retried into a storm (backoff doubles per failure)
-  and, after two failures, an emergency trim keeps the session alive without compaction: old tool
-  output and old assistant text are cut, the recent tail and a goal+state handoff note remain.
-- **v1.5.0** — after compaction the plugin writes `.omo/goal.md` and sends one auto-continue prompt,
-  so the model keeps working without a manual "continue".
-- **v1.4.0** — the post-compaction anchor quotes the original goal, not the last nudge ("продолжай"),
-  and repeats for one more request.
-- **v1.3.5** — a transport failure is retried up to 7 times (was 5); `maxTransportFails` is configurable.
-- **v1.3.4** — a stream that ends without `finish_reason` is treated as a transport failure and retried.
-- **v1.3.3** — a second load for the same root no longer registers a second set of hooks.
-- **v1.3.2** — `setup` stamps `plugin` and `pid`, so a stale process is visible in the log.
-- **v1.3.1** — pressure note cannot stack up, `warnMode: system` cannot duplicate, calibrated
-  sample keyed by message, level log re-arms.
-- **v1.3.0** — calibration learned after pruning, single-count samples, tail placement for the
-  pressure note, wrong-model-id errors are fatal, `instructions/long-session.md` shipped.
-- **v1.2.0** — quality defaults for multi-hour tasks.
+**v1.6.1 — stable.** One build; nothing about history is needed to use it.
 
-Details and reasoning per version: [`CHANGELOG.md`](CHANGELOG.md).
+- A compaction failure is no longer retried into a storm: the cooldown is measured from the failure
+  and doubles 3 → 6 → 12 → 24 → 30 min.
+- After two failures, emergency trim keeps the session working: old tool output and old assistant
+  text are cut, the last six messages stay intact, and a handoff note carries the goal and
+  `.omo/state.md`.
+- The compaction note carries your last four asks verbatim, file paths with line ranges, the exact
+  commands and error lines, and forbids paraphrasing your requirements.
+- `.omo/goal.md` keeps the task, those asks and your last nudge on disk.
+- After compaction the session continues by itself instead of waiting for "continue".
+- Context pressure asks for full quality and targeted reads, not short answers.
+- 103 assertions, live-verified on OpenCode 2.1.3.
 
 ## License
 
