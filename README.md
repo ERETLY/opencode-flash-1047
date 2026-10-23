@@ -3,7 +3,7 @@
 A hardened, long-session-safe entry for the free `deepseek-v4.1-flash-free` model in
 **OpenCode 2.x**, plus the plugin that keeps multi-hour runs from dying.
 
-**Version:** v1.3.3 · **Status:** unit-tested (78/78), live-tested on OpenCode 2.1.2 for the v1.2.0
+**Version:** v1.3.4 · **Status:** unit-tested (81/81), live-tested on OpenCode 2.1.2 for the v1.2.0
 baseline · **Cost:** $0 · **Scope:** one provider, one model id, nothing else is touched.
 
 ---
@@ -296,7 +296,7 @@ node --experimental-strip-types test/resilience.test.mjs   # Node >= 22.6, no de
 ```
 
 `test/resilience.test.mjs` drives the plugin through a fake session and a fake event stream, so
-behaviour is asserted rather than eyeballed. **Last run: 78 / 78 passed.**
+behaviour is asserted rather than eyeballed. **Last run: 81 / 81 passed.**
 
 | area | asserted |
 |---|---|
@@ -325,7 +325,7 @@ Measured against the author's **OpenCode 2.1.2** (v1.2.0 baseline):
 | scoping | a non-guarded session produced only a `setup` line |
 | model switching | never — `switchModel` not called |
 
-**Honesty about coverage:** v1.3.0-v1.3.3 are unit-tested, not live-re-run. The v1.3.1 changes
+**Honesty about coverage:** v1.3.0-v1.3.4 are unit-tested, not live-re-run. The v1.3.1 changes
 only affect situations a unit rig can simulate exactly (a replayed message array, a second
 identically-sized turn), but the first long session after upgrading is the real test. Watch
 `calibrate` lines for a `cal` that stays near its pre-prune value and `warn` lines with
@@ -336,7 +336,7 @@ identically-sized turn), but the first long session after upgrading is the real 
 ```
 plugin/resilience/index.ts    the OpenCode v2 plugin
 instructions/long-session.md  long-session rules, loaded via the `instructions` array
-test/resilience.test.mjs      regression suite (78 assertions, no dependencies)
+test/resilience.test.mjs      regression suite (81 assertions, no dependencies)
 opencode.snippet.jsonc        reference config fragment (provider + plugin + compaction + instructions)
 scripts/apply-config.js       idempotent config merge + plugin and rules copy (node)
 install.ps1 / install.sh      convenience installers
@@ -381,6 +381,7 @@ buy or leak.
 
 ## 15. Changelog
 
+- **v1.3.4** — a stream that ends without `finish_reason` is treated as a transport failure and retried.
 - **v1.3.3** — a second load for the same root no longer registers a second set of hooks.
 - **v1.3.2** — `setup` stamps `plugin` and `pid`, so a stale process is visible in the log.
 - **v1.3.1** — pressure note cannot stack up, `warnMode: system` cannot duplicate, calibrated

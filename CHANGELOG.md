@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.3.4 – 2026-10-23
+
+Found in the live message store, not in a test.
+
+### Fixed
+
+- **A truncated stream was not retried.** The free gateway sometimes ends an SSE response after
+  `data: {...}` deltas **without the final chunk that carries `finish_reason`**, usually on long
+  reasoning streams (`variant: "max"`). OpenCode surfaces it as
+  `provider.invalid-output: OpenAI Chat stream ended without finish_reason` (or
+  `Invalid ... stream event` when a chunk is cut mid-frame). It arrives as HTTP 200 with no status,
+  so the retry hook saw nothing transient and the step failed with no retry at all. Both messages
+  are now classified as transport failures: dense retry (`1200 ms × attempt`, capped at 8 s), a
+  forced prune on the second failure, and the usual 5-failure cap before the resume path takes over.
+- Same class, same fix: `unexpected end of stream`, `incomplete stream/response`.
+
+### Tests
+
+81 assertions (was 78). The three new ones fail on v1.3.3: the truncated stream is not retried, the
+cut stream frame is not retried, and the second failure never arms the forced prune.
+
 ## v1.3.3 – 2026-10-22
 
 One real defect, found in the live log.

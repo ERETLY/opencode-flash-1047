@@ -10,7 +10,7 @@ const WIDE_PER_TOKEN = 2.0
 const PLUGIN_ID = 'omni-resilience'
 // Stamped into every `setup` log line, so "is the version I installed actually the version that
 // is running?" is answerable from the log instead of from the file hash.
-const VERSION = '1.3.3'
+const VERSION = '1.3.4'
 
 // Errors that neither a retry nor a resume prompt can fix: a wrong credential, a missing route or a
 // model id the gateway does not know. The old pattern `model.unavailable` matched exactly one
@@ -826,8 +826,15 @@ export default {
         return
       }
 
+      // A stream that stops before its final chunk is a transport failure even though it arrives as
+      // HTTP 200 and often has no status at all: the socket is fine, the body just ends. OpenCode
+      // reports it as `provider.invalid-output` with "OpenAI Chat stream ended without finish_reason"
+      // (or "Invalid ... stream event" when a chunk is cut mid-frame). The free gateway does this on
+      // long reasoning streams; without this pattern the step fails with no retry.
       const transport =
-        /transport|econnreset|connection lost|socket|premature|network error|fetch failed|closed unexpectedly/i.test(blob)
+        /transport|econnreset|connection lost|socket|premature|network error|fetch failed|closed unexpectedly|invalid-output|stream ended|without finish_reason|stream event|unexpected end of|incomplete (stream|response)/i.test(
+          blob,
+        )
       const isRate = status === 429 || /rate.?limit|too many requests|quota/i.test(blob)
       const endpointDead =
         (typeof status === 'number' && status >= 500) ||
