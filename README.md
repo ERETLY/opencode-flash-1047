@@ -3,8 +3,9 @@
 A hardened, long-session-safe entry for the free `deepseek-v4.1-flash-free` model in
 **OpenCode 2.x**, plus the plugin that keeps multi-hour runs from dying.
 
-**Version:** v1.6.1 · **Status:** unit-tested (103/103), live-tested on OpenCode 2.1.2 for the v1.2.0
-baseline · **Cost:** $0 · **Scope:** one provider, one model id, nothing else is touched.
+**Version:** v1.6.1 · **Status:** stable - 103/103 unit tests, live-verified on OpenCode 2.1.3
+(two consecutive compactions completed, zero emergency trims across a 250k-token session) ·
+**Cost:** $0 · **Scope:** one provider, one model id, nothing else is touched.
 
 ---
 
@@ -243,12 +244,33 @@ pruning starts where there is still room rather than at 170 000. The cost is lat
 | **stall** | 15 min without an event, verified against server state, then interrupt → verify → resume |
 | **checkpoints** | `.omo/checkpoints/<session>.json` every 20 tool calls, on start/finish, around compaction |
 | **re-anchor** | one system part after compaction: quotes the task, forbids restarting or inventing work |
-| **compaction note** | appended as a **new user message** with task, tools, files, last step, `.omo/state.md` |
+| **goal file** | `.omo/goal.md` on every substantive message: the task, the last four asks verbatim, the last nudge |
+| **compaction note** | appended as a **new user message** with the user's own words, paths with line ranges, commands, errors, last step, `.omo/state.md` |
+| **compaction failure** | silence, not a retry: the cooldown is measured from the failure and doubles 3 -> 6 -> 12 -> 24 -> 30 min |
+| **emergency mode** | after two failures: above `emergencyRatio` old tool output becomes 600/200 chars, old assistant text and reasoning 600 chars, the last six messages stay byte-identical, and a handoff note carries the goal plus `.omo/state.md` |
 
 The compaction note is a new message on purpose. Adding a text part to a `tool` message makes the
 request invalid on strict protocols (`OpenAI Chat: tool messages only support tool-result content
 for now`), and appending to an assistant message puts instructions inside the model's own past
 output. A fresh trailing user message is legal everywhere.
+
+### What speed to expect
+
+Measured on a real 250k-token session: 96 user messages, 1 047 assistant steps, 1 093 tool calls.
+
+| | |
+|---|---|
+| model calls per user message | ~11 |
+| generation per step, median / p90 | 10.4 s / 30 s |
+| total generation time | ~4 hours |
+| context re-sent per step | ~155 000 tokens (cached) |
+
+A step costs roughly what the context costs, so a fresh chat answers in seconds while a 250k
+session costs 10-30 s per step. This plugin makes long sessions **survivable**, not **fast**: it
+caps the context at 310 000, trims old tool output and stops compaction from storming. If latency
+matters more than continuity, start a new session - that resets the per-step cost to a few thousand
+tokens. Switching the variant from `max` to `high` changes the measured median by under 10%, so it
+is not a speed lever.
 
 ## 9. The log
 
@@ -284,14 +306,15 @@ A healthy long session looks like: steady `calibrate` lines with `cal` between 0
 **Is the version I installed the version that is running?** Look at the `setup` line:
 
 ```json
-{"at":"setup","plugin":"1.3.3","pid":17136,"guarded":"flash1047/deepseek-v4.1-flash-free", ...}
+{"at":"setup","plugin":"1.6.1","pid":17136,"guarded":"flash1047/deepseek-v4.1-flash-free", ...}
 ```
 
-A `setup` line **without** `plugin` is an older build still held in memory — the runtime loads the
-plugin once per server process, so a new file on disk only takes effect after the server itself
-restarts (fully quit the app, not just the window). No `setup` line for your session at all is the
-other, more common case: the session is not on `flash1047/deepseek-v4.1-flash-free`, so the plugin
-is doing exactly what it promises — nothing.
+A `setup` line **without** `plugin` is an older build still held in memory. The runtime re-reads the
+plugin when it starts a server instance for a project, which usually happens on its own (a new
+`setup` line with the new version appears after the file changes); if it still shows the old
+version, quit the app completely and reopen it. No `setup` line for your session at all is the other,
+more common case: the session is not on `flash1047/deepseek-v4.1-flash-free`, so the plugin is doing
+exactly what it promises - nothing.
 
 ## 10. Tests and evidence
 
@@ -311,7 +334,9 @@ behaviour is asserted rather than eyeballed. **Last run: 103 / 103 passed.**
 | pressure note | appended after the history, system prompt untouched, logged once per level, not counted as history, `warnMode: "system"` works, a persisted note does not stack, a stale note is stripped, the level re-arms |
 | thresholds | 82% does not compact, 85% does, reply reservation shrinks near the ceiling |
 | compaction safety | keep floor tracks the option, no-history sessions skip, `Nothing to compact yet` does not hot-loop, a lost event cannot wedge the flag |
-| compaction note | exactly one appended user message, existing messages byte-identical, task/tools/files/last step preserved |
+| compaction note | exactly one appended user message, existing messages byte-identical, task/tools/files/last step preserved, the user's own words, a ranged read as `file:from-to`, commands verbatim, the anti-paraphrase instruction |
+| compaction recovery | a failure raises the backoff (720 000 ms after two), emergency mode turns on, no request while the backoff holds, old assistant text is cut, the handoff note carries the task, a successful compaction resets the mode |
+| goal file | the task is written, a nudge does not replace it, every ask is kept verbatim |
 | re-anchor | one system part, quotes the task, injected once |
 | retry | 5xx/429/transport retried, invalid-request not retried, gives up after 5 resets, "Model is unavailable" not retried and not resumed |
 | switching | `switchModel` is never called |
@@ -329,11 +354,21 @@ Measured against the author's **OpenCode 2.1.2** (v1.2.0 baseline):
 | scoping | a non-guarded session produced only a `setup` line |
 | model switching | never — `switchModel` not called |
 
-**Honesty about coverage:** v1.3.0-v1.6.1 are unit-tested, not live-re-run. The v1.3.1 changes
-only affect situations a unit rig can simulate exactly (a replayed message array, a second
-identically-sized turn), but the first long session after upgrading is the real test. Watch
-`calibrate` lines for a `cal` that stays near its pre-prune value and `warn` lines with
-`"mode":"tail"`.
+Run live on **OpenCode 2.1.3**, v1.6.0/v1.6.1, author's install:
+
+| observation | result |
+|---|---|
+| compactions | two completions in one session (summary 5 567 and 6 633 chars), no `compact-backoff` between them |
+| emergency trim | zero `emergency-trim` lines in a 250k-token session |
+| pruning volume | 1 499-3 099 chars per request - tool output only, history untouched |
+| plugin reload | a `setup` line with `plugin: 1.6.1` appeared after the file changed, without restarting the app |
+| session footprint | 1 047 model steps, 1 093 tool calls, 1.29 M chars of hidden reasoning, 145k chars of visible text |
+
+**What is and is not covered.** Every behaviour above is unit-tested, and the v1.6.x line has run
+live for hours on 2.1.3: compaction, pruning, both kinds of note, retries, goal file. Two things
+stay environment-dependent and are deliberately not asserted: gateway latency and how often the
+summariser stream gets truncated, because both move with the free pool's load. The plugin reacts to
+them (transport retry, compaction backoff, emergency trim) instead of pretending to predict them.
 
 ## 11. Files
 
@@ -358,6 +393,8 @@ CHANGELOG.md                  what changed and why, per version
 | **`400 Model is unavailable`** | the model key must stay `deepseek-v4.1-flash-free`; only `name` is cosmetic. |
 | **no plugin activity** | no `setup` line → wrong path. It must be `~/.config/opencode/plugins/resilience/index.ts`, a **directory** containing `index.ts`. |
 | **`ECONNRESET` after HTTP 200** | the free gateway closed the stream. Handled: transport retry, force-prune on the 2nd, then a clean failure instead of a hang. |
+| **a long chat feels slow** | one user message costs ~11 model calls, each re-reading the whole context: measured 10-30 s per step at 250k tokens. Start a new session for a new task. The plugin caps and trims; it does not make the model faster. |
+| **`compact-backoff` with a growing `fails`** | the gateway keeps truncating the summariser. Nothing to fix: the session continues through the emergency trim until a compaction gets through. |
 | **compaction fails with `provider.invalid-request`** | an old plugin appended the note to the trailing tool message. Update `plugin/resilience/index.ts`. |
 | **resume prompt keeps appearing** | a turn genuinely ended with no answer. Check `stall*` / `resume-skip` lines. |
 | **every log line appears twice** | the plugin is loaded twice (directory scan + `plugins` config entry). Since v1.3.3 the second load logs `setup-duplicate` and does not register hooks; if you still see doubles, an older build is running — check `plugin` in the `setup` line. |

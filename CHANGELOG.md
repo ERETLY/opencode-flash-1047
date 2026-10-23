@@ -25,6 +25,13 @@ The two things that made the model look dumber in long chats.
 103 assertions (was 98): the note carries the user's own words, a ranged read as `file:from-to`,
 commands verbatim, the anti-paraphrase instruction, and the noise-free wording checks.
 
+### Live verification
+
+Run on OpenCode 2.1.3 against the free gateway: two compactions completed in the same session
+(summaries of 5 567 and 6 633 chars) with no `compact-backoff` between them, zero `emergency-trim`
+lines across 250k tokens of context, and pruning at 1 499-3 099 chars per request - tool output
+only, history untouched.
+
 ## v1.6.0 – 2026-10-23
 
 Compaction that cannot succeed must not be retried forever, and the session must survive without it.
