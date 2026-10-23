@@ -1,5 +1,47 @@
 # Changelog
 
+## v1.6.0 – 2026-10-23
+
+Compaction that cannot succeed must not be retried forever, and the session must survive without it.
+
+### Fixed
+
+- **A failed compaction now buys silence instead of another attempt.** The summary request is the
+  longest request in a session, so it is the one the provider truncates (`stream ended without
+  finish_reason`). The old code counted the cooldown from the *request*, so it had already expired
+  when the failure arrived - the next user message immediately asked for compaction again. On
+  22 October that produced five compaction attempts in 23 minutes, none of which finished
+  (`ses_e9e67afd...`). The cooldown is now measured from the failure and doubles per consecutive
+  failure: 3 min → 6 → 12 → 24 → 30 max.
+- **Emergency mode after two failures.** The plugin stops depending on compaction: above
+  `emergencyRatio` (default `0.5`) every outgoing request has its old tool output cut to 600/200
+  chars and its old assistant text/reasoning cut to 600 chars, while the last 6 messages stay
+  byte-identical. A handoff note carries the goal and `.omo/state.md`, so the trimmed-away turns are
+  not needed. No model call is involved, so there is nothing for the provider to truncate.
+- **The session no longer stops at `interrupted`.** In `chkr2: почему нет ответа по Solana` the
+  compaction died at 03:49:08 after four truncated retries and the session went idle-interrupted
+  with the context still at 0.851 - the next message would have started the same cycle. With the
+  backoff plus the trim, the same message is answered instead.
+- The auto-continue error handler referenced an `event` variable that does not exist in that scope;
+  it now uses the session id.
+
+### Tests
+
+98 assertions (was 91). New: a failure raises the backoff and enables emergency mode; no compaction
+request is issued while the backoff holds; old assistant text is cut; the handoff note carries the
+task; the mode switches off after a successful compaction.
+
+## v1.5.0 – 2026-10-23
+
+After compaction the model continues by itself.
+
+- **`.omo/goal.md`** - written on every substantive user message: the task verbatim plus the last
+  nudge. When the summary loses the task, the file still has it.
+- **auto-continue** - `session.compaction.ended` used to leave the session idle, waiting for a manual
+  "continue". One short prompt is now sent 1.5 s later (idle session only, 60 s cooldown, max 3 per
+  session): read `.omo/goal.md` and `.omo/state.md`, take the next unfinished step, do not summarise,
+  do not stop to ask.
+
 ## v1.4.0 – 2026-10-23
 
 The post-compaction drift, fixed at its source.

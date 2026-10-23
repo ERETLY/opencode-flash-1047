@@ -58,6 +58,8 @@
         "compact": 0.85,
         "hard": 0.93,
         "pruneSoft": 0.7,
+        // after 2 failed compactions: trim old history above this ratio instead of compacting
+        "emergencyRatio": 0.5,
         "every": 20,
         "stallMs": 900000,
         "maxResumes": 4,

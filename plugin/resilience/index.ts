@@ -10,7 +10,7 @@ const WIDE_PER_TOKEN = 2.0
 const PLUGIN_ID = 'omni-resilience'
 // Stamped into every `setup` log line, so "is the version I installed actually the version that
 // is running?" is answerable from the log instead of from the file hash.
-const VERSION = '1.5.0'
+const VERSION = '1.6.0'
 
 // Errors that neither a retry nor a resume prompt can fix: a wrong credential, a missing route or a
 // model id the gateway does not know. The old pattern `model.unavailable` matched exactly one
@@ -34,6 +34,10 @@ const DEFAULTS = {
   hard: 0.93,
   every: 20,
   cooldownMs: 180000,
+  // When compaction keeps failing (the provider truncates the summarisation stream) the session
+  // must survive without it. Below this ratio the emergency trim leaves the request alone; above
+  // it, old tool output and old assistant text are cut so the prompt fits the provider ceiling.
+  emergencyRatio: 0.5,
   stallMs: 900000,
   maxResumes: 4,
   resumeCooldownMs: 120000,
@@ -158,6 +162,7 @@ export default {
       hard: Number(opts.hard ?? DEFAULTS.hard),
       every: Number(opts.every ?? DEFAULTS.every),
       cooldownMs: Number(opts.cooldownMs ?? DEFAULTS.cooldownMs),
+      emergencyRatio: Number(opts.emergencyRatio ?? DEFAULTS.emergencyRatio),
       stallMs: Number(opts.stallMs ?? DEFAULTS.stallMs),
       maxResumes: Number(opts.maxResumes ?? DEFAULTS.maxResumes),
       resumeCooldownMs: Number(opts.resumeCooldownMs ?? DEFAULTS.resumeCooldownMs),
@@ -214,6 +219,8 @@ export default {
           lastTool: 'none',
           lastPrompt: '',
           lastCompactAt: 0,
+          compactFails: 0,
+          emergency: false,
           compacting: false,
           estimatedTokens: 0,
           contextLimit: CFG.limit,
@@ -675,6 +682,78 @@ export default {
         }
       }
 
+      // ---- emergency trim: the session has to survive without compaction ----------
+      // flash1047 cuts the summarisation stream, so compaction can fail again and again. After two
+      // failures the plugin stops relying on it: every request above emergencyRatio gets its old
+      // tool output and old assistant/reasoning text cut to a stub, the recent tail stays intact,
+      // and one handoff note keeps the goal and .omo/state.md visible. No model call happens here,
+      // so there is nothing for the provider to truncate.
+      if (s.compactFails >= 2 && ratio >= CFG.emergencyRatio && Array.isArray(event.messages)) {
+        try {
+          const keepTail = 6
+          const stop = Math.max(0, event.messages.length - keepTail)
+          let saved = 0
+          let touched = 0
+          for (let i = 0; i < stop; i++) {
+            const m = event.messages[i]
+            if (!m || !Array.isArray(m.content)) continue
+            if (m.role === 'tool') {
+              for (const p of m.content) {
+                const value = p?.result?.value
+                if (p?.type !== 'tool-result' || p?.result?.type !== 'text' || typeof value !== 'string') continue
+                if (value.includes('[omni-resilience]')) continue
+                const next = headTail(value, 600, 200)
+                if (next.length < value.length) {
+                  saved += value.length - next.length
+                  p.result.value = next
+                  touched += 1
+                }
+              }
+            } else if (m.role === 'assistant') {
+              for (const p of m.content) {
+                if (p?.type !== 'text' && p?.type !== 'reasoning') continue
+                const value = typeof p?.text === 'string' ? p.text : ''
+                if (value.length <= 800 || value.includes('[omni-resilience]')) continue
+                p.text = value.slice(0, 600) + '\n[trimmed by omni-resilience: compaction unavailable]'
+                saved += value.length - p.text.length
+                touched += 1
+              }
+            }
+          }
+          if (saved > 0) {
+            used = Math.round((estimate(event.messages) + estimate(event.system)) * cal)
+            ratio = used / CFG.limit
+            s.estimatedTokens = used
+            log({ at: 'emergency-trim', sessionID: event.sessionID, saved, messages: touched, used, ratio: Number(ratio.toFixed(3)), fails: s.compactFails })
+          }
+          // The trimmed-away turns are gone for good, so the goal and the state file travel in the
+          // request instead of a summary that was never written.
+          let stateText = ''
+          try {
+            stateText = fs.readFileSync(path.join(root, '.omo', 'state.md'), 'utf8').trim().slice(0, 1500)
+          } catch {}
+          const goal = String(s.goal || s.lastInstruction || '').trim().slice(0, 400)
+          event.messages.push({
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text:
+                  '[omni-resilience] Automatic note, not from the user. Automatic compaction is unavailable for ' +
+                  'this session, so older turns were shortened to keep the request inside the context limit; the ' +
+                  'recent tail is intact. ' +
+                  (goal ? `The task is: "${goal}". ` : '') +
+                  'Read .omo/goal.md and .omo/state.md before continuing, then take the next unfinished step. ' +
+                  'Do not restart the task and do not invent new work.' +
+                  (stateText ? `\n\nCurrent .omo/state.md:\n${stateText}` : ''),
+              },
+            ],
+          })
+        } catch (e: any) {
+          log({ at: 'emergency-trim-error', sessionID: event.sessionID, error: String(e?.message || e) })
+        }
+      }
+
       s.estimatedTokens = used
 
       // Re-arm the level log when the context drops back under the warn line (compaction, a big
@@ -736,7 +815,13 @@ export default {
         }
       }
 
-      if (ratio >= CFG.compact && !s.compacting && Date.now() - s.lastCompactAt > CFG.cooldownMs) {
+      // A failure must buy silence, not another attempt three minutes later. The summarisation
+      // request is the longest one in a session, so it is the one the provider cuts; retrying it
+      // on the normal cooldown turned one truncation into a compaction storm. The cooldown doubles
+      // per consecutive failure: 3 min -> 6 -> 12 -> 24 -> 30 max.
+      const compactBackoff =
+        s.compactFails > 0 ? Math.min(1800000, CFG.cooldownMs * Math.pow(2, Math.min(4, s.compactFails))) : CFG.cooldownMs
+      if (ratio >= CFG.compact && !s.compacting && Date.now() - s.lastCompactAt > compactBackoff) {
         // OpenCode 2.1.2 keeps the recent `compaction.keep` tokens (default 15 000) verbatim and
         // only summarises what is older. Below that floor the runtime answers "Nothing to compact
         // yet" (SessionCompaction.compaction.unavailable) and a tiny session cannot be compacted
@@ -1051,6 +1136,24 @@ export default {
               s.compactingSince = 0
               s.compactEmpty = 0
               s.marks = {}
+              if (type === 'session.compaction.failed') {
+                // Count consecutive failures and let the backoff start from the failure, not from
+                // the request that was issued minutes earlier: that is what made the old cooldown
+                // expire exactly when the next user message arrived.
+                s.compactFails = Number(s.compactFails || 0) + 1
+                s.emergency = s.compactFails >= 2
+                s.lastCompactAt = Date.now()
+                log({
+                  at: 'compact-backoff',
+                  sessionID: id,
+                  fails: s.compactFails,
+                  emergency: s.emergency,
+                  nextTryMs: Math.min(1800000, CFG.cooldownMs * Math.pow(2, Math.min(4, s.compactFails))),
+                })
+              } else {
+                s.compactFails = 0
+                s.emergency = false
+              }
               // re-anchor the model on the next request: compaction moves the conversation into a
               // summary, which is exactly where agents drift into invented work
               if (type === 'session.compaction.ended') {
@@ -1077,7 +1180,7 @@ export default {
                     })
                     log({ at: 'auto-continue', sessionID: id, attempt: cur.autoContinues })
                   } catch (e: any) {
-                    log({ at: 'auto-continue-error', sessionID: event.sessionID, error: String(e?.message || e) })
+                    log({ at: 'auto-continue-error', sessionID: id, error: String(e?.message || e) })
                   }
                 }, 1500)
               }

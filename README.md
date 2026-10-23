@@ -3,7 +3,7 @@
 A hardened, long-session-safe entry for the free `deepseek-v4.1-flash-free` model in
 **OpenCode 2.x**, plus the plugin that keeps multi-hour runs from dying.
 
-**Version:** v1.5.0 · **Status:** unit-tested (91/91), live-tested on OpenCode 2.1.2 for the v1.2.0
+**Version:** v1.6.0 · **Status:** unit-tested (98/98), live-tested on OpenCode 2.1.2 for the v1.2.0
 baseline · **Cost:** $0 · **Scope:** one provider, one model id, nothing else is touched.
 
 ---
@@ -199,6 +199,7 @@ plugin's, and the shipped config overrides only `keep` and `contextLimit`.
 | `ceiling` | `318000` | measured hard limit; reply reservation is clamped below it |
 | `margin` | `4000` | headroom kept free for estimator error |
 | `cooldownMs` | `180000` | minimum gap between compaction requests |
+| `emergencyRatio` | `0.5` | after 2 failed compactions, the ratio above which old history is trimmed |
 | `compactingTtlMs` | `120000` | watchdog: clear a `compaction.started` flag that never ends |
 | `every` | `20` | checkpoint interval, in tool calls |
 | `stallMs` | `900000` | no provider event for this long while the server says "running" → stall |
@@ -257,6 +258,8 @@ the event name:
 | `at` | when | useful fields |
 |---|---|---|
 | `setup` | plugin loaded | `plugin` (version), `pid`, `guarded`, `modelSwitching`, option values |
+| `compact-backoff` | a compaction failed | `fails`, `emergency`, `nextTryMs` |
+| `emergency-trim` | old history was cut because compaction is unavailable | `saved`, `messages`, `used`, `ratio`, `fails` |
 | `setup-duplicate` | a simultaneous second load of the same plugin for this root | `plugin`, `pid`, `note` — hooks stay registered once |
 | `ctx` | first 12 requests only | `used`, `est`, `cal`, `ratio`, `msgs`, `toolChars` |
 | `prune` | tool output elided | `saved`, `messages`, `forced` |
@@ -297,7 +300,7 @@ node --experimental-strip-types test/resilience.test.mjs   # Node >= 22.6, no de
 ```
 
 `test/resilience.test.mjs` drives the plugin through a fake session and a fake event stream, so
-behaviour is asserted rather than eyeballed. **Last run: 91 / 91 passed.**
+behaviour is asserted rather than eyeballed. **Last run: 98 / 98 passed.**
 
 | area | asserted |
 |---|---|
@@ -326,7 +329,7 @@ Measured against the author's **OpenCode 2.1.2** (v1.2.0 baseline):
 | scoping | a non-guarded session produced only a `setup` line |
 | model switching | never — `switchModel` not called |
 
-**Honesty about coverage:** v1.3.0-v1.5.0 are unit-tested, not live-re-run. The v1.3.1 changes
+**Honesty about coverage:** v1.3.0-v1.6.0 are unit-tested, not live-re-run. The v1.3.1 changes
 only affect situations a unit rig can simulate exactly (a replayed message array, a second
 identically-sized turn), but the first long session after upgrading is the real test. Watch
 `calibrate` lines for a `cal` that stays near its pre-prune value and `warn` lines with
@@ -337,7 +340,7 @@ identically-sized turn), but the first long session after upgrading is the real 
 ```
 plugin/resilience/index.ts    the OpenCode v2 plugin
 instructions/long-session.md  long-session rules, loaded via the `instructions` array
-test/resilience.test.mjs      regression suite (91 assertions, no dependencies)
+test/resilience.test.mjs      regression suite (98 assertions, no dependencies)
 opencode.snippet.jsonc        reference config fragment (provider + plugin + compaction + instructions)
 scripts/apply-config.js       idempotent config merge + plugin and rules copy (node)
 install.ps1 / install.sh      convenience installers
@@ -382,7 +385,14 @@ buy or leak.
 
 ## 15. Changelog
 
-- **v1.5.0** — after compaction the plugin writes `.omo/goal.md` and sends one auto-continue prompt, so the model keeps working without a manual "continue".`n- **v1.4.0** — the post-compaction anchor quotes the original goal, not the last nudge ("продолжай"), and repeats for one more request.`n- **v1.3.5** — a transport failure is retried up to 7 times (was 5); `maxTransportFails` is configurable.
+- **v1.6.0** — compaction failures are no longer retried into a storm (backoff doubles per failure)
+  and, after two failures, an emergency trim keeps the session alive without compaction: old tool
+  output and old assistant text are cut, the recent tail and a goal+state handoff note remain.
+- **v1.5.0** — after compaction the plugin writes `.omo/goal.md` and sends one auto-continue prompt,
+  so the model keeps working without a manual "continue".
+- **v1.4.0** — the post-compaction anchor quotes the original goal, not the last nudge ("продолжай"),
+  and repeats for one more request.
+- **v1.3.5** — a transport failure is retried up to 7 times (was 5); `maxTransportFails` is configurable.
 - **v1.3.4** — a stream that ends without `finish_reason` is treated as a transport failure and retried.
 - **v1.3.3** — a second load for the same root no longer registers a second set of hooks.
 - **v1.3.2** — `setup` stamps `plugin` and `pid`, so a stale process is visible in the log.

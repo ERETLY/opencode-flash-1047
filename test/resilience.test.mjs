@@ -96,6 +96,17 @@ const manyTools = (count = 120, size = 12000) => {
   out.push({ role: 'user', content: [{ type: 'text', text: 'go' }] })
   return out
 }
+// Long assistant/user prose: the normal prune never touches it, so it is what the emergency trim
+// has to deal with when compaction is unavailable.
+const manyChatter = (count = 100, size = 8000) => {
+  const out = []
+  for (let i = 0; i < count; i++) {
+    const role = i % 10 === 0 ? 'user' : 'assistant'
+    out.push({ role, content: [{ type: 'text', text: 'x'.repeat(size) }] })
+  }
+  out.push({ role: 'user', content: [{ type: 'text', text: 'go' }] })
+  return out
+}
 const clone = (v) => JSON.parse(JSON.stringify(v))
 
 // ---------------------------------------------------------------- scope
@@ -342,6 +353,35 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   check('auto-continue: the prompt points at goal.md', String(r.calls.prompt[0] || '').includes('.omo/goal.md'))
   await r.emit('session.compaction.ended', {}, 1700)
   check('auto-continue: respects the 60 s cooldown', r.calls.prompt.length === 1)
+}
+
+// ---------------------------------------------------------------- compaction fails -> emergency
+{
+  const r = await rig()
+  await r.prompt('fix the crypto checker and verify every claim')
+  await r.emit('session.compaction.failed')
+  await r.emit('session.compaction.failed')
+  const backoff = r.log().filter((x) => x.at === 'compact-backoff').pop()
+  check('compaction: a failure raises the backoff', backoff?.fails === 2 && backoff?.nextTryMs === 720000, JSON.stringify(backoff))
+  check('compaction: emergency mode turns on after two failures', backoff?.emergency === true)
+
+  const msgs = manyChatter()
+  const system = []
+  await r.context(msgs, system)
+  await sleep(30)
+  console.log('DBG len=' + msgs.length + ' m1=' + String(msgs[1]?.content?.[0]?.text || '').length + ' lastRole=' + msgs[msgs.length-1]?.role + ' lastTxt=' + String(msgs[msgs.length-1]?.content?.[0]?.text || '').slice(0,30))
+  check('compaction: no new request while the backoff holds', r.calls.compact === 0, `compact=${r.calls.compact}`)
+  const oldest = msgs.slice(0, 90).filter((m) => m.role === 'assistant')
+  const longest = Math.max(...oldest.map((m) => String(m.content?.[0]?.text || '').length))
+  check('emergency: old assistant text cut to a stub', longest < 1500, `longest=${longest} ` + JSON.stringify(r.log().filter((x) => x.at === 'emergency-trim').pop()))
+  check('emergency: handoff note carries the task', String(msgs[msgs.length - 1]?.content?.[0]?.text || '').includes('fix the crypto checker'))
+  check('emergency: logged', r.log().some((x) => x.at === 'emergency-trim'))
+
+  await r.emit('session.compaction.ended')
+  const msgs2 = manyChatter()
+  await r.context(msgs2, [])
+  const trims = r.log().filter((x) => x.at === 'emergency-trim').length
+  check('emergency: off again after a successful compaction', trims === 1, `trims=${trims}`)
 }
 
 // ---------------------------------------------------------------- retry, no switching
