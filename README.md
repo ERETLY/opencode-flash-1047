@@ -470,6 +470,7 @@ them (transport retry, compaction backoff, emergency trim) instead of pretending
 | **`400 Model is unavailable`** | the model key must stay `deepseek-v4.1-flash-free`; only `name` is cosmetic. |
 | **no plugin activity** | no `setup` line → wrong path. It must be `~/.config/opencode/plugins/resilience/index.ts`, a **directory** containing `index.ts`. |
 | **`ECONNRESET` after HTTP 200** | the free gateway closed the stream. Handled: transport retry, force-prune on the 2nd, then a clean failure instead of a hang. |
+| **`429 Too Many Requests`** | the free pool is shared and the plugin already waits it out (backoff up to 15 s per attempt, 60 s budget). If you are behind a shared address - VPN, corporate NAT, campus - the limit may be counting other people's traffic rather than yours, and another network can clear it. The client never bypasses anything: it only waits and retries. |
 | **a long chat feels slow** | one user message costs ~11 model calls, each re-reading the whole context: measured 10–30 s per step at 250k tokens. Start a new session for a new task. The plugin caps and trims; it does not make the model faster. |
 | **`compact-backoff` with a growing `fails`** | the gateway keeps truncating the summariser. Nothing to fix: the session continues through the emergency trim until a compaction gets through. |
 | **compaction fails with `provider.invalid-request`** | the note was appended to the trailing tool message. Use the current `plugin/resilience/index.ts` - the note must be a new user message. |
