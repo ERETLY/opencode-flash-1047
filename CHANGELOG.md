@@ -1,5 +1,29 @@
 # Changelog
 
+## v1.6.5 – 2026-10-24
+
+Taking a message back and rewriting it now replaces it.
+
+### Fixed
+
+- **A full rewrite no longer leaves the old wording beside it.** Editing a message in the TUI stages a
+  revert and admits the new text as a fresh prompt, and the plugin saw only two messages of the same
+  kind: an addition extended by a few words deduped itself, but a rewrite in different words was
+  appended as a second addition. The hook now reads the transcript and checks whether the prompt it
+  recorded last is still there. A reverted message is gone from it, so the entry that message produced
+  is removed before the new one is filed. A second message sent without a revert is still in the
+  transcript and is still appended.
+- The same rule applies to the task: a reverted and rewritten task replaces the goal and its
+  requirement entry instead of adding another slot.
+- The check is capped at two seconds and fails towards the old behaviour: if the transcript cannot be
+  read, nothing is removed.
+
+### Tests
+
+132 assertions (was 126): a reverted-and-rewritten addition replaces the old wording, a message still
+in history is not treated as an edit, a reverted-and-rewritten task replaces the old goal, and the
+revision is logged as `goal-revision`.
+
 ## v1.6.4 – 2026-10-24
 
 An addition is labelled once, as context.

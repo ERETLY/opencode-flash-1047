@@ -1,4 +1,4 @@
-import fs from 'node:fs'
+﻿import fs from 'node:fs'
 import path from 'node:path'
 
 // Token estimate. ASCII averages ~3.6 chars/token on this endpoint, but wide text (Cyrillic,
@@ -10,7 +10,7 @@ const WIDE_PER_TOKEN = 2.0
 const PLUGIN_ID = 'omni-resilience'
 // Stamped into every `setup` log line, so "is the version I installed actually the version that
 // is running?" is answerable from the log instead of from the file hash.
-const VERSION = '1.6.4'
+const VERSION = '1.6.5'
 
 // Errors that neither a retry nor a resume prompt can fix: a wrong credential, a missing route or a
 // model id the gateway does not know. The old pattern `model.unavailable` matched exactly one
@@ -211,6 +211,23 @@ const pushAsk = (list: any, t: string, cap = 4): string[] => {
 }
 const ADDITIONS_CAP = 12
 
+// A message can be taken back: revert it in the TUI, rewrite it, send again. OpenCode admits the
+// edited text as a fresh prompt, so without this the first version stays in goal.md and the rewrite
+// lands beside it as if it were a second demand. Two prompts of the same kind, the second arriving
+// while the first is still unanswered and inside the window, are one intent written twice.
+const REVISION_WINDOW_MS = 10 * 60_000
+
+// Stored entries are truncated, so a long addition cannot be compared with ===. Twenty-four shared
+// leading characters are specific enough to say "this is the entry that message produced".
+const sameEntry = (a: string, b: string): boolean => {
+  const x = String(a || '').trim()
+  const y = String(b || '').trim()
+  if (!x || !y) return false
+  if (x === y) return true
+  const n = Math.min(x.length, y.length, 200)
+  return n >= 24 && x.slice(0, n) === y.slice(0, n)
+}
+
 export default {
   id: PLUGIN_ID,
   async setup(ctx: any) {
@@ -335,6 +352,36 @@ export default {
     const manage = async (sessionID: string, s: any) => {
       if (!s.modelID || !s.providerID) await ensureModel(sessionID, s)
       return ours(s)
+    }
+
+    // The previous prompt is still in the transcript unless the user reverted it. OpenCode removes
+    // the reverted message before admitting the rewrite, so "the text I saw last time is gone" is
+    // the signal that this is an edit, not a second message. A read failure answers null and the
+    // caller keeps the old behaviour: append, never delete on a guess.
+    const priorStillInHistory = async (sessionID: string, prev: string): Promise<boolean | null> => {
+      try {
+        const res: any = await Promise.race([
+          ctx.session.context({ sessionID }),
+          new Promise((r) => setTimeout(() => r(null), 2000)),
+        ])
+        if (!res) return null
+        const msgs = res?.messages ?? res?.data ?? res
+        if (!Array.isArray(msgs)) return null
+        for (const m of msgs) {
+          if (String(m?.role || '') !== 'user') continue
+          const c = m?.content ?? m?.parts ?? ''
+          const text =
+            typeof c === 'string'
+              ? c
+              : Array.isArray(c)
+                ? c.map((p: any) => (p?.type === 'text' ? String(p.text || '') : '')).join(' ')
+                : ''
+          if (sameEntry(text, prev)) return true
+        }
+        return false
+      } catch {
+        return null
+      }
     }
 
     const writeCheckpoint = async (sessionID: string, reason: string) => {
@@ -594,6 +641,36 @@ export default {
       if (!internal) {
         const t = String(text || '').trim()
         s.lastPrompt = text
+        // A rewrite of the previous message: same kind, still unanswered, inside the window. The
+        // entry the first version produced is removed so the file does not keep a stale copy.
+        const kind = t && !isContinuation(t) ? (isAddition(t) ? 'addition' : 'task') : ''
+        let revised = false
+        if (
+          kind &&
+          kind === s.lastPromptKind &&
+          s.lastPromptAt &&
+          t !== s.lastPromptText &&
+          Date.now() - s.lastPromptAt <= REVISION_WINDOW_MS
+        ) {
+          const priorInHistory = await priorStillInHistory(event.sessionID, s.lastPromptText)
+          if (priorInHistory === false) {
+            const list =
+              kind === 'addition'
+                ? Array.isArray(s.additions)
+                  ? s.additions.slice()
+                  : []
+                : Array.isArray(s.asks)
+                  ? s.asks.slice()
+                  : []
+            if (list.length && sameEntry(list[list.length - 1], s.lastPromptText)) {
+              list.pop()
+              revised = true
+              if (kind === 'addition') s.additions = list
+              else s.asks = list
+            }
+          }
+        }
+        if (revised) log({ at: 'goal-revision', sessionID: event.sessionID, kind, chars: t.length })
         if (t && isContinuation(t)) {
           // a nudge: keep the goal, remember what was asked on top of it
           s.lastInstruction = t.slice(0, 200)
@@ -620,6 +697,11 @@ export default {
           // history left, so the requirements live in goal.md as well. An extension of a previous
           // ask replaces it rather than consuming another slot.
           s.asks = pushAsk(Array.isArray(s.asks) ? s.asks : [], t.slice(0, 600))
+        }
+        if (kind) {
+          s.lastPromptKind = kind
+          s.lastPromptText = t
+          s.lastPromptAt = Date.now()
         }
         // The goal is a file, not a phrase list. Whatever the task is, it is written down once and
         // the post-compaction anchor points at it; the summary can lose it, the file cannot.

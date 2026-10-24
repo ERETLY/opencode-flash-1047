@@ -20,6 +20,9 @@ async function rig(options = {}, model = { providerID: 'flash1047', id: 'deepsee
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'res-'))
   const hooks = {}
   const calls = { prompt: [], compact: 0, switchModel: 0, context: 0 }
+  // what the transcript holds: every admitted prompt, in order. Tests that simulate a revert pass
+  // their own `context` and omit the message the user took back.
+  const history = []
   let queue = []
   let waiter = null
   const push = (ev) => {
@@ -43,7 +46,11 @@ async function rig(options = {}, model = { providerID: 'flash1047', id: 'deepsee
       get: async () => ({ status: { type: 'idle' }, outcome: 'failed', model }),
       context: async () => {
         calls.context += 1
-        return { messages: [{ role: 'user', content: 'do the task' }, tmsg('last', 'y')] }
+        return {
+          messages: history.length
+            ? history.slice()
+            : [{ role: 'user', content: 'do the task' }, tmsg('last', 'y')],
+        }
       },
       prompt: async (arg) => {
         calls.prompt.push(arg.text)
@@ -73,7 +80,13 @@ async function rig(options = {}, model = { providerID: 'flash1047', id: 'deepsee
   }
   const context = (msgList, system = [], extra = {}) =>
     hooks.context[0]({ sessionID: 'ses_test', model, system, messages: msgList, options: {}, ...extra })
-  const prompt = (text) => hooks.prompt[0]({ sessionID: 'ses_test', prompt: { text } })
+  const prompt = (text) => {
+    const p = hooks.prompt[0]({ sessionID: 'ses_test', prompt: { text } })
+    // admission persists after the hook runs; the next prompt must see this one in the transcript
+    return p.then(() => {
+      history.push({ role: 'user', content: [{ type: 'text', text }] })
+    })
+  }
   const retry = (err, attempt = 1) => {
     const ev = { sessionID: 'ses_test', attempt, error: err }
     return hooks.retry[0](ev).then(() => ev)
@@ -532,6 +545,59 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   const a = sys[0]?.text || ''
   const hits = (a.match(/поиск запущен/g) || []).length
   check('additions: the anchor quotes it once, not twice', hits === 1, `hits=${hits}`)
+}
+
+{
+  // a message the user reverted and rewrote before any answer is one intent, not two: the rewrite
+  // replaces the entry the first version produced. The reverted message is gone from the transcript.
+  const reverted = {
+    context: async () => ({ messages: [{ role: 'assistant', content: [{ type: 'text', text: 'ok' }] }] }),
+  }
+  const r = await rig({}, undefined, reverted)
+  await r.prompt('audit the checker so that we never lose a token across the chains')
+  await r.prompt('к сведению: мой прогон идёт параллельно, так что прокси могут тупить')
+  await r.prompt('к сведению: мой прогон идёт параллельно, поэтому часть прокси будет тупить и отваливаться')
+  const g = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  const adds = (g.split('## Additions')[1] || '').split('## Last instruction')[0]
+  check('revision: an edited addition replaces the old one', (adds.match(/^\d+\. /gm) || []).length === 1, adds.trim().slice(0, 300))
+  check('revision: the newest wording wins', adds.includes('часть прокси будет тупить'), adds.trim().slice(0, 300))
+  check('revision: the edit is logged', r.log().some((x) => x.at === 'goal-revision' && x.kind === 'addition'))
+}
+
+{
+  // a second message is an addition, not an edit: the first one is still in the transcript
+  const A1 = 'к сведению: мой прогон идёт параллельно, так что прокси могут тупить'
+  const answered = {
+    context: async () => ({
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'audit the checker so that we never lose a token' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'working' }] },
+        { role: 'user', content: [{ type: 'text', text: A1 }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'noted' }] },
+      ],
+    }),
+  }
+  const r = await rig({}, undefined, answered)
+  await r.prompt('audit the checker so that we never lose a token across the chains')
+  await r.prompt(A1)
+  await r.prompt('к сведению: мой прогон идёт параллельно, поэтому часть прокси будет тупить и отваливаться')
+  const g = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  const adds = (g.split('## Additions')[1] || '').split('## Last instruction')[0]
+  check('revision: a message still in history is not treated as an edit', (adds.match(/^\d+\. /gm) || []).length === 2, adds.trim().slice(0, 300))
+}
+
+{
+  // the same rule for the task itself
+  const reverted = {
+    context: async () => ({ messages: [{ role: 'assistant', content: [{ type: 'text', text: 'ok' }] }] }),
+  }
+  const r = await rig({}, undefined, reverted)
+  await r.prompt('проверь на других адресах что мы НЕ ТЕРЯЕМ токены')
+  await r.prompt('проверь на других адресах, биржевые кошельки и тестовые сидки, что мы НЕ ТЕРЯЕМ токены')
+  const g = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  const reqs = (g.split('## Requirements')[1] || '').split('## Additions')[0]
+  check('revision: an edited task replaces the old one', (reqs.match(/^\d+\. /gm) || []).length === 1, reqs.trim().slice(0, 300))
+  check('revision: the goal is the newest wording', /# Goal\n\nпроверь на других адресах, биржевые кошельки/.test(g))
 }
 
 {
