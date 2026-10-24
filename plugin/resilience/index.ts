@@ -10,7 +10,7 @@ const WIDE_PER_TOKEN = 2.0
 const PLUGIN_ID = 'omni-resilience'
 // Stamped into every `setup` log line, so "is the version I installed actually the version that
 // is running?" is answerable from the log instead of from the file hash.
-const VERSION = '1.6.1'
+const VERSION = '1.6.2'
 
 // Errors that neither a retry nor a resume prompt can fix: a wrong credential, a missing route or a
 // model id the gateway does not know. The old pattern `model.unavailable` matched exactly one
@@ -150,6 +150,62 @@ const isContinuation = (t: string): boolean => {
   return CONTINUE_RE.test(s)
 }
 
+// An addition is not a task. "у меня поиск запущен, просто чтобы ты знал" is context the model has
+// to hold, not the goal - otherwise the post-compaction anchor would tell it to continue "the
+// search is running" instead of the real task.
+//
+// Two tiers, deliberately. A phrase that describes itself as information ("просто чтобы ты знал",
+// "к сведению") is trusted on its own. A bare state report ("у меня запущен...") is NOT enough:
+// "у меня запущен старый чекер и он падает на BNB - почини" is a task that happens to mention a
+// running process, and misfiling it would leave the goal stale and silent. So the weak tier only
+// counts when no imperative is present.
+const ADDITION_STRONG_RE =
+  /(?:чтобы ты (?:знал|понимал|учитывал|имел в виду)|просто (?:знай|имей в виду)|имей в виду|для информации|к сведению|на заметку|не как задание)/i
+const ADDITION_WEAK_RE = /(?:у меня (?:сейчас )?(?:запущ|идёт|идет|работает)|я запустил|мой поиск)/i
+const TASK_VERB_RE =
+  /(?:почини|исправь|сделай|добавь|убери|удали|напиши|перепиши|замени|запусти|проверь|перепроверь|протестируй|найди|посмотри|разберись|обнови|построй|собери|отрефакторь|оптимизируй|настрой|сравни|посчитай|покажи)/i
+const isAddition = (t: string): boolean => {
+  const s = String(t || '').trim()
+  if (!s || s.length > 700) return false
+  if (ADDITION_STRONG_RE.test(s)) return true
+  return ADDITION_WEAK_RE.test(s) && !TASK_VERB_RE.test(s)
+}
+
+// Two messages sharing a leading run are the same requirement written twice - the user extended
+// it or retyped it with more detail. Keeping both eats the limited slots in goal.md with one
+// demand (observed live: one reworded message took three of the four slots). Containment covers an
+// appended tail. Deliberately NOT word-overlap based: merging on shared vocabulary would silently
+// fuse two different requirements into one, and a duplicate costs a slot while a merged demand
+// costs the actual task.
+const sameAsk = (a: string, b: string): boolean => {
+  const x = String(a || '').trim().slice(0, 200)
+  const y = String(b || '').trim().slice(0, 200)
+  if (!x || !y) return false
+  if (x === y) return true
+  const short = x.length < y.length ? x : y
+  const long = x.length < y.length ? y : x
+  if (short.length < 24) return false
+  if (long.startsWith(short)) return true
+  // Containment without a size guard would fuse two different demands whenever the older one
+  // happens to be quoted inside a longer new one. Half the length is the cut-off: an extension
+  // keeps most of the original, a different ask that merely mentions it does not.
+  return long.includes(short) && short.length / long.length >= 0.5
+}
+
+// Append without duplicating a requirement the user already wrote. The longer version wins,
+// because the extension is usually where the detail lives.
+const pushAsk = (list: any, t: string): string[] => {
+  const out: string[] = Array.isArray(list) ? list.slice() : []
+  for (let i = out.length - 1; i >= 0; i--) {
+    if (sameAsk(out[i], t)) {
+      out[i] = t.length > out[i].length ? t : out[i]
+      return out.slice(-4)
+    }
+  }
+  out.push(t)
+  return out.slice(-4)
+}
+
 export default {
   id: PLUGIN_ID,
   async setup(ctx: any) {
@@ -241,6 +297,7 @@ export default {
           anchor: null,
           anchorLeft: 0,
           goal: '',
+          additions: [],
           lastInstruction: '',
           cal: 1.18, // measured default: real prompt tokens / estimate on this endpoint
           calN: 0,
@@ -535,13 +592,21 @@ export default {
         if (t && isContinuation(t)) {
           // a nudge: keep the goal, remember what was asked on top of it
           s.lastInstruction = t.slice(0, 200)
+        } else if (t && isAddition(t) && String(s.goal || '').trim()) {
+          // Context, not a task. "у меня поиск запущен, просто чтобы ты знал" must be held in mind
+          // without displacing the goal: the post-compaction anchor quotes s.goal, and pointing it
+          // at an informational aside is how the model ends up continuing the wrong work.
+          s.lastInstruction = t.slice(0, 200)
+          s.additions = pushAsk(Array.isArray(s.additions) ? s.additions : [], t.slice(0, 600))
+          log({ at: 'goal-addition', sessionID: event.sessionID, chars: t.length, additions: s.additions.length })
         } else if (t) {
           s.goal = t.slice(0, 1200)
           s.goalAt = Date.now()
           s.lastInstruction = ''
           // Keep the user's own words, not a paraphrase: after compaction the summary is the only
-          // history left, so the requirements live in goal.md as well.
-          s.asks = [...(Array.isArray(s.asks) ? s.asks : []), t.slice(0, 600)].slice(-4)
+          // history left, so the requirements live in goal.md as well. An extension of a previous
+          // ask replaces it rather than consuming another slot.
+          s.asks = pushAsk(Array.isArray(s.asks) ? s.asks : [], t.slice(0, 600))
         }
         // The goal is a file, not a phrase list. Whatever the task is, it is written down once and
         // the post-compaction anchor points at it; the summary can lose it, the file cannot.
@@ -552,6 +617,8 @@ export default {
             `# Goal\n\n${s.goal || '(not set yet)'}\n\n` +
               `## Requirements (the user's own words, oldest first)\n\n` +
               `${(Array.isArray(s.asks) && s.asks.length ? s.asks : []).map((a: string, i: number) => `${i + 1}. ${a}`).join('\n') || '(none yet)'}\n\n` +
+              `## Additions (context to take into account, NOT tasks)\n\n` +
+              `${(Array.isArray(s.additions) && s.additions.length ? s.additions : []).map((a: string, i: number) => `${i + 1}. ${a}`).join('\n') || '(none)'}\n\n` +
               `## Last instruction\n\n${s.lastInstruction || '(none)'}\n\n---\n` +
               `_Updated ${new Date().toISOString()} by omni-resilience (session ${event.sessionID}). ` +
               `This file is the task contract after compaction - edit it freely._\n`,
@@ -583,10 +650,22 @@ export default {
       if (s.anchor) {
         const goal = String(s.goal || s.lastPrompt || '').trim().slice(0, 800)
         const nudge = String(s.lastInstruction || '').trim().slice(0, 200)
+        const adds: string[] = (Array.isArray(s.additions) ? s.additions : [])
+          .map((a: string) => String(a || '').trim())
+          .filter(Boolean)
+          .slice(-2)
+        // The last instruction and the latest addition are usually the same message. Quoting it
+        // twice costs tokens and reads like two separate demands.
+        const nudgeIsAddition = !!nudge && adds.some((a) => sameAsk(a, nudge))
         const text =
           `[omni-resilience] The conversation was just compacted; earlier turns exist only as a summary. ` +
           (goal ? `The user's task, verbatim: "${goal}". ` : `Your task is in the summary. `) +
-          (nudge && nudge !== goal
+          (adds.length
+            ? `Context they added on top of the task (hold in mind, NOT tasks - do not swap the goal for it): ${adds
+                .map((a) => `"${a}"`)
+                .join(' | ')}. `
+            : '') +
+          (nudge && nudge !== goal && !nudgeIsAddition
             ? `Their last instruction was only "${nudge}" - that means carry on with the task above. `
             : '') +
           `Before anything else, read .omo/goal.md and .omo/state.md, then take the next unfinished step. ` +
@@ -929,14 +1008,18 @@ export default {
             }
           }
           // The user's own words are the requirements. A summary that paraphrases them loses what
-          // was actually asked for, so the last few are carried verbatim.
+          // was actually asked for, so the last few are carried verbatim. An extension of an
+          // earlier ask (same prefix) replaces it: otherwise one reworded demand eats three of the
+          // four slots and a second requirement never makes it into the summary.
           if (role === 'user') {
             const text = m.content
               .filter((p: any) => p?.type === 'text')
               .map((p: any) => String(p.text || ''))
               .join('\n')
               .trim()
-            if (text && !/^\[omni-resilience\]/.test(text)) facts.asks.push(text.slice(0, 500))
+            if (text && !/^\[omni-resilience\]/.test(text) && !isAddition(text)) {
+              facts.asks = pushAsk(facts.asks, text.slice(0, 500))
+            }
           }
         }
         facts.lastStep = last.slice(0, 700)
@@ -947,9 +1030,18 @@ export default {
         facts.errors = facts.errors.slice(-3)
       } catch {}
 
+      const goalAdds: string[] = (Array.isArray(s.additions) ? s.additions : [])
+        .map((a: string) => String(a || '').trim())
+        .filter(Boolean)
+        .slice(-2)
       const note =
         `[omni-resilience] Facts that MUST survive this compaction (session ${event.sessionID}). ` +
-        (task ? `The user's request, verbatim: "${task}". ` : '') +
+        (task ? `The user's TASK, verbatim: "${task}". ` : '') +
+        (goalAdds.length
+          ? `Context the user added on top of the task (hold in mind, NOT tasks): ${goalAdds
+              .map((a) => `"${a}"`)
+              .join(' | ')}. `
+          : '') +
         (facts.asks.length
           ? `The user's own words, in order (these ARE the requirements): ${facts.asks.map((a) => `"${a}"`).join(' | ')}. `
           : '') +

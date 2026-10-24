@@ -1,5 +1,38 @@
 # Changelog
 
+## v1.6.2 – 2026-10-24
+
+One goal, and a rewrite that replaces instead of piling up.
+
+### Fixed
+
+- **An informational message no longer overwrites the task.** Live evidence: a session where the
+  user asked "проверь на других адресах, что мы НЕ ТЕРЯЕМ токены" and then added "у меня поиск
+  запущен, просто чтобы ты знал, ошибки по прокси могут быть". `goal.md` recorded the *addition* as
+  the goal, so the post-compaction anchor would have told the model to continue "the search is
+  running" instead of the audit. The addition now goes to `## Additions (context to take into
+  account, NOT tasks)` and the anchor quotes it as context that must not replace the goal.
+- **A reworded requirement replaces the old one.** The same `goal.md` held one message three times
+  because every extension was appended as a new requirement, leaving one real slot for the actual
+  task. An extension (prefix, or containment of at least half the length) now replaces the previous
+  entry and the longer version wins. The same dedupe applies to the `asks` carried in the
+  compaction note.
+- **The classifier cannot swallow real work.** A bare state report is not enough on its own: a
+  message that mentions a running process *and* asks for something ("у меня запущен старый чекер и
+  он падает на BNB - почини") stays a task. Only a phrase that describes itself as information
+  ("просто чтобы ты знал", "к сведению") is trusted unconditionally.
+- **The compaction note no longer restates an addition as a requirement.** `facts.asks` skipped
+  informational messages; otherwise the note carried the addition twice, once as "context, NOT
+  tasks" and once as "these ARE the requirements".
+
+### Tests
+
+119 assertions (was 103): an addition does not replace the goal, it lands in its own section, the
+anchor carries it as context, a state report that asks for work stays the goal, the note does not
+restate an addition as a requirement, an extension does not consume a slot, the longest version
+wins, a genuinely new requirement is appended, a different ask that merely mentions an older one is
+not merged into it, and an addition with no task on record still becomes the goal.
+
 ## v1.6.1 – 2026-10-23
 
 The two things that made the model look dumber in long chats.

@@ -1,15 +1,16 @@
-# flash 1047 — Super Free
+﻿# flash 1047 — Super Free
 
 [![release](https://img.shields.io/github/v/release/ERETLY/opencode-flash-1047?label=release)](https://github.com/ERETLY/opencode-flash-1047/releases)
-[![tests](https://img.shields.io/badge/tests-103%2F103-brightgreen)](#tests-and-evidence)
+[![tests](https://img.shields.io/badge/tests-119%2F119-brightgreen)](#tests-and-evidence)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![opencode](https://img.shields.io/badge/OpenCode-2.x-black)](https://opencode.ai)
 
 A free **310K-context** `deepseek-v4.1-flash-free` entry for **OpenCode 2.x**, plus the plugin that
 keeps multi-hour sessions from dying, drifting, or quietly getting dumber.
 
-**Version:** v1.6.1 · **Status:** stable — 103/103 unit tests, live-verified on OpenCode 2.1.3 ·
-**Cost:** $0 · **Scope:** one provider, one model id, nothing else is touched.
+**Version:** v1.6.2 · **Status:** stable — 119/119 unit tests, the compaction/pruning core
+live-verified on OpenCode 2.1.3 · **Cost:** $0 · **Scope:** one provider, one model id, nothing else
+is touched.
 
 ```powershell
 # Windows
@@ -129,6 +130,8 @@ mechanical. Switch to a paid model when the problem is the thinking, not the typ
 | compaction fires every turn and fails | cooldown counted from the request, not the failure | backoff measured from the failure: 3 → 6 → 12 → 24 → 30 min |
 | the session goes idle after compaction and waits for you | nothing continues the turn | auto-continue prompt + `.omo/goal.md` on disk |
 | "the model forgot what I asked" | the summary paraphrased your requirements away | the compaction note carries your last four asks **verbatim**, and `goal.md` keeps a `## Requirements` section |
+| after compaction it continues the wrong thing | an informational "у меня поиск запущен, просто чтобы ты знал" overwrote the goal | **one goal**: an addition goes to its own `## Additions` section and is quoted as context, never as the task |
+| one reworded demand eats the task list | every message was appended as a new requirement | an extension **replaces** the old requirement (the longer version wins) instead of taking another slot |
 | the model gets lazy in long chats | pressure notes said "keep replies short, avoid re-reading" | notes now say: full quality, verify, use targeted reads, record findings |
 | a stream dies mid-answer (`ECONNRESET`) | the free gateway closes it | transport retry, force-prune on the second failure |
 | the whole session dies at ~250k | the summariser stream gets truncated | emergency trim: old tool output and old text are cut, the session keeps working |
@@ -352,7 +355,8 @@ pruning starts where there is still room rather than at 170 000. The cost is lat
 | **stall** | 15 min without an event, verified against server state, then interrupt → verify → resume |
 | **checkpoints** | `.omo/checkpoints/<session>.json` every 20 tool calls, on start/finish, around compaction |
 | **re-anchor** | one system part after compaction: quotes the task, forbids restarting or inventing work |
-| **goal file** | `.omo/goal.md` on every substantive message: the task, the last four asks verbatim, the last nudge |
+| **goal file** | `.omo/goal.md` on every substantive message: the task, the last four asks verbatim, the additions, the last nudge |
+| **one goal** | a message flagged as informational ("у меня поиск запущен, чтобы ты знал") goes to `## Additions` and never replaces the task; an extension of an existing ask replaces it instead of taking another slot |
 | **compaction note** | appended as a **new user message** with the user's own words, paths with line ranges, commands, errors, last step, `.omo/state.md` |
 | **compaction failure** | silence, not a retry: the cooldown is measured from the failure and doubles 3 → 6 → 12 → 24 → 30 min |
 | **emergency mode** | after two failures: above `emergencyRatio` old tool output becomes 600/200 chars, old assistant text and reasoning 600 chars, the last six messages stay byte-identical, and a handoff note carries the goal plus `.omo/state.md` |
@@ -383,6 +387,7 @@ the event name:
 | `warn` / `warn-rearm` | level entered / log re-armed after a drop | `key`, `ratio`, `mode` |
 | `note-strip` | a stale pressure note was removed | `removed` |
 | `anchor` | post-compaction re-anchor injected | `task` |
+| `goal-addition` | a message was classified as context, not a task | `chars`, `additions` |
 | `retry*` | `retry-hook`, `retry`, `retry-fatal`, `retry-giveup` | `status`, `reason`, `delay`, `budget` |
 | `transport-fail` | stream died mid-flight | `count`, `status` |
 | `resume*` | `resume`, `resume-sent`, `resume-skip`, `resume-capped` | `reason` |
@@ -396,7 +401,7 @@ A healthy long session looks like: steady `calibrate` lines with `cal` between 0
 **Is the version I installed the version that is running?** Look at the `setup` line:
 
 ```json
-{"at":"setup","plugin":"1.6.1","pid":17136,"guarded":"flash1047/deepseek-v4.1-flash-free", ...}
+{"at":"setup","plugin":"1.6.2","pid":17136,"guarded":"flash1047/deepseek-v4.1-flash-free", ...}
 ```
 
 A `setup` line **without** `plugin` is a different build still held in memory. The runtime re-reads the
@@ -413,7 +418,7 @@ node --experimental-strip-types test/resilience.test.mjs   # Node >= 22.6, no de
 ```
 
 `test/resilience.test.mjs` drives the plugin through a fake session and a fake event stream, so
-behaviour is asserted rather than eyeballed. **Last run: 103 / 103 passed.**
+behaviour is asserted rather than eyeballed. **Last run: 119 / 119 passed.**
 
 | area | asserted |
 |---|---|
@@ -427,6 +432,7 @@ behaviour is asserted rather than eyeballed. **Last run: 103 / 103 passed.**
 | compaction note | exactly one appended user message, existing messages byte-identical, task/tools/files/last step preserved, the user's own words, a ranged read as `file:from-to`, commands verbatim, the anti-paraphrase instruction |
 | compaction recovery | a failure raises the backoff (720 000 ms after two), emergency mode turns on, no request while the backoff holds, old assistant text is cut, the handoff note carries the task, a successful compaction resets the mode |
 | goal file | the task is written, a nudge does not replace it, every ask is kept verbatim |
+| **one goal** | an informational message does not replace the goal, it lands in `## Additions`, the anchor quotes the task and carries the addition as context, an extension does not consume another requirement slot, the longest version wins, a genuinely new requirement is appended, an addition with no task on record still becomes the goal, a reworded requirement is not duplicated in the compaction note |
 | re-anchor | one system part, quotes the task, injected once |
 | retry | 5xx/429/transport retried, invalid-request not retried, gives up after 5 resets, "Model is unavailable" not retried and not resumed |
 | switching | `switchModel` is never called |
@@ -444,21 +450,33 @@ Measured against the author's **OpenCode 2.1.2**:
 | scoping | a non-guarded session produced only a `setup` line |
 | model switching | never — `switchModel` not called |
 
-Run live on **OpenCode 2.1.3**, v1.6.1, author's install:
+Run live on **OpenCode 2.1.3**, author's install (the compaction/pruning core this release builds on):
 
 | observation | result |
 |---|---|
 | compactions | two completions in one session (summary 5 567 and 6 633 chars), no `compact-backoff` between them |
 | emergency trim | zero `emergency-trim` lines in a 250k-token session |
 | pruning volume | 1 499–3 099 chars per request — tool output only, history untouched |
-| plugin reload | a `setup` line with `plugin: 1.6.1` appeared after the file changed, without restarting the app |
+| plugin reload | a `setup` line with the new `plugin` version appeared after the file changed, without restarting the app |
 | session footprint | 1 047 model steps, 1 093 tool calls, 1.29 M chars of hidden reasoning, 145k chars of visible text |
 
-**What is and is not covered.** Every behaviour above is unit-tested, and the v1.6.x line has run
-live for hours on 2.1.3: compaction, pruning, both kinds of note, retries, goal file. Two things
-stay environment-dependent and are deliberately not asserted: gateway latency and how often the
-summariser stream gets truncated, because both move with the free pool's load. The plugin reacts to
-them (transport retry, compaction backoff, emergency trim) instead of pretending to predict them.
+Replayed against a **real chat** that exhibited the failure (two Russian messages: a task, then an
+informational "у меня поиск запущен, просто чтобы ты знал…"):
+
+| before | after |
+|---|---|
+| `# Goal` = the informational message | `# Goal` = the task ("…НЕ ТЕРЯЕМ токены") |
+| three identical entries under `## Requirements` | one requirement, the longest version |
+| the addition nowhere on its own | `## Additions (context to take into account, NOT tasks)` |
+| anchor quoted the aside as the task | anchor quotes the task, adds the aside as context, and says not to swap them |
+
+**What is and is not covered.** Every behaviour above is unit-tested, and the compaction/pruning
+core has run live for hours on 2.1.3: compaction, pruning, both kinds of note, retries, goal file.
+The goal/additions classification is asserted by the suite and verified by that replay, not by a
+multi-hour live run. Two things stay environment-dependent and are deliberately not asserted:
+gateway latency and how often the summariser stream gets truncated, because both move with the free
+pool's load. The plugin reacts to them (transport retry, compaction backoff, emergency trim)
+instead of pretending to predict them.
 
 ## Troubleshooting
 
@@ -521,7 +539,7 @@ retries. The failure modes it cannot remove are the free pool's latency and load
 ```
 plugin/resilience/index.ts    the OpenCode v2 plugin
 instructions/long-session.md  long-session rules, loaded via the `instructions` array
-test/resilience.test.mjs      regression suite (103 assertions, no dependencies)
+test/resilience.test.mjs      regression suite (119 assertions, no dependencies)
 opencode.snippet.jsonc        reference config fragment (provider + plugin + compaction + instructions)
 scripts/apply-config.js       idempotent config merge + plugin and rules copy (node)
 install.ps1 / install.sh      convenience installers
@@ -559,8 +577,13 @@ Limits worth knowing before you build on it:
 
 ## This release
 
-**v1.6.1 — stable.** One build; nothing about history is needed to use it.
+**v1.6.2 — stable.** One build; nothing about history is needed to use it.
 
+- **One goal.** An informational message ("у меня поиск запущен, просто чтобы ты знал") is context,
+  not a task: it goes to `## Additions` in `goal.md` and is quoted after compaction as context that
+  must not be swapped for the goal.
+- **A rewritten requirement replaces the old one.** Extending a demand keeps one entry instead of
+  eating another of the four slots; the longest version wins, and a genuinely new demand is appended.
 - A compaction failure is no longer retried into a storm: the cooldown is measured from the failure
   and doubles 3 → 6 → 12 → 24 → 30 min.
 - After two failures, emergency trim keeps the session working: old tool output and old assistant
@@ -568,10 +591,11 @@ Limits worth knowing before you build on it:
   `.omo/state.md`.
 - The compaction note carries your last four asks verbatim, file paths with line ranges, the exact
   commands and error lines, and forbids paraphrasing your requirements.
-- `.omo/goal.md` keeps the task, those asks and your last nudge on disk.
+- `.omo/goal.md` keeps the task, those asks, the additions and your last nudge on disk.
 - After compaction the session continues by itself instead of waiting for "continue".
 - Context pressure asks for full quality and targeted reads, not short answers.
-- 103 assertions, live-verified on OpenCode 2.1.3.
+- 119 assertions; the compaction/pruning core live-verified on OpenCode 2.1.3, the goal/additions
+  classification verified against a real chat that exhibited the failure.
 
 ## License
 

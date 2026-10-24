@@ -298,6 +298,30 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   check('compaction: note tells the summariser what must not be lost', /file path and line/i.test(note2) && /symbol\/function\/table name/i.test(note2))
 }
 
+{
+  // one reworded requirement must not take three of the four slots in the note either
+  const r = await rig()
+  await r.prompt('audit the checker so that we never lose a token across the chains')
+  const msgs = [
+    { role: 'user', content: [{ type: 'text', text: 'audit the checker so that we never lose a token across the chains' }] },
+    {
+      role: 'user',
+      content: [{ type: 'text', text: 'audit the checker so that we never lose a token across the chains, and print the diff for every chain' }],
+    },
+    { role: 'user', content: [{ type: 'text', text: 'and also compare the two runs against ankr' }] },
+  ]
+  await r.compaction(msgs)
+  const note = msgs.at(-1).content[0].text
+  const words = note.split("The user's own words")[1]?.split('.')[0] || ''
+  check(
+    'compaction: an extension does not duplicate a requirement in the note',
+    (words.match(/audit the checker/g) || []).length === 1,
+    words.slice(0, 200),
+  )
+  check('compaction: the note keeps the longest version of a reworded requirement', words.includes('print the diff'))
+  check('compaction: a genuinely new requirement survives the dedupe', words.includes('compare the two runs against ankr'))
+}
+
 // ---------------------------------------------------------------- post-compaction anchor
 {
   const r = await rig()
@@ -355,6 +379,105 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
     g3.includes('write the long report about solana') && g3.includes('only check wallets above 1000'),
     g3.split('\n').slice(0, 8).join(' / '),
   )
+}
+
+// ------------------------------------------------------- one goal, additions marked as additions
+{
+  const r = await rig()
+  await r.prompt('audit the checker so that we never lose a token across the chains')
+  const p = path.join(r.root, '.omo', 'goal.md')
+  await r.prompt(
+    'и да, у меня поиск запущен просто чтобы ты знал, что ошибки по прокси могут быть, проверь что всё гуд',
+  )
+  const g = fs.readFileSync(p, 'utf8')
+  check(
+    'additions: an informational message does not replace the goal',
+    /# Goal\n\naudit the checker so that we never lose a token/.test(g),
+    g.split('\n').slice(0, 3).join(' / '),
+  )
+  check(
+    'additions: the message lands in its own section, not in requirements',
+    /## Additions \(context to take into account, NOT tasks\)\n\n1\. и да, у меня поиск запущен/.test(g) &&
+      !/## Requirements[\s\S]*?и да, у меня поиск запущен[\s\S]*?## Additions/.test(g),
+  )
+  await r.emit('session.compaction.ended', {}, 1700)
+  const sys = []
+  await r.context([], sys)
+  const a = sys[0]?.text || ''
+  check('additions: the anchor still quotes the real task', a.includes('audit the checker so that we never lose a token'), a.slice(0, 120))
+  check('additions: the anchor carries the addition as context, not as the task', /NOT tasks[\s\S]*поиск запущен/.test(a))
+}
+
+{
+  // the classifier must not swallow real work: "у меня запущен X, почини" is a task, not a status
+  const r = await rig()
+  await r.prompt('build the report generator for the token checker')
+  await r.prompt('у меня запущен старый чекер и он падает на BNB - почини эту ошибку в chck3.py')
+  const g = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  check(
+    'additions: a state report that also asks for work stays the goal',
+    /# Goal\n\nу меня запущен старый чекер/.test(g) && !/## Additions[\s\S]*почини эту ошибку/.test(g),
+    g.split('\n').slice(0, 3).join(' / '),
+  )
+}
+
+{
+  // and an addition must not come back as a "requirement" in the compaction note
+  const r = await rig()
+  const TASK = 'audit the checker so that we never lose a token across the chains'
+  const ADD = 'и да, у меня поиск запущен просто чтобы ты знал, что ошибки по прокси могут быть'
+  await r.prompt(TASK)
+  await r.prompt(ADD)
+  const msgs = [
+    { role: 'user', content: [{ type: 'text', text: TASK }] },
+    { role: 'user', content: [{ type: 'text', text: ADD }] },
+  ]
+  await r.compaction(msgs)
+  const note = msgs.at(-1).content[0].text
+  const asks = note.split("The user's own words")[1]?.split('Work done so far')[0] || ''
+  check('additions: the note does not restate the addition as a requirement', !asks.includes('поиск запущен') && asks.includes('never lose a token'), asks.trim().slice(0, 200))
+  check('additions: the note still carries the addition as context', /NOT tasks[\s\S]*поиск запущен/.test(note), note.slice(0, 200))
+}
+
+{
+  // a rewritten requirement replaces the old one instead of eating another slot
+  const r = await rig()
+  await r.prompt('check the other addresses and the test seeds to be sure tokens are not lost')
+  await r.prompt(
+    'check the other addresses and the test seeds to be sure tokens are not lost, and also the exchange wallets',
+  )
+  await r.prompt(
+    'check the other addresses and the test seeds to be sure tokens are not lost, and also the exchange wallets, print the full diff',
+  )
+  const g = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  const asks = (g.split('## Requirements')[1] || '').split('## Additions')[0]
+  check('dedupe: an extension does not consume another requirement slot', (asks.match(/^\d+\. /gm) || []).length === 1, asks.trim().slice(0, 200))
+  check('dedupe: the longest version of the requirement wins', asks.includes('print the full diff'))
+  await r.prompt('now also compare the two runs against ankr and report the lost contracts')
+  const g2 = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  const asks2 = (g2.split('## Requirements')[1] || '').split('## Additions')[0]
+  check('dedupe: a genuinely new requirement is appended', (asks2.match(/^\d+\. /gm) || []).length === 2, asks2.trim().slice(0, 300))
+  check('dedupe: the rewritten goal is the current one', /# Goal\n\nnow also compare the two runs/.test(g2))
+}
+
+{
+  // a short ask quoted inside a much longer, different ask must not be merged away
+  const r = await rig()
+  await r.prompt('fix the parser bug in src/a.ts')
+  await r.prompt(
+    'now write a full report for the client about how we fixed the parser bug in src/a.ts, with a timeline of every step and the cost of each one',
+  )
+  const g = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  const asks = (g.split('## Requirements')[1] || '').split('## Additions')[0]
+  check('dedupe: a different ask that merely mentions the old one is not merged into it', (asks.match(/^\d+\. /gm) || []).length === 2, asks.trim().slice(0, 300))
+}
+
+{
+  // an addition with no goal yet is still worth keeping: it is the only intent on record
+  const r = await rig()
+  await r.prompt('у меня поиск запущен просто чтобы ты знал, проверь пожалуйста что всё гуд по прокси')
+  const g = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  check('additions: with no task on record it still becomes the goal', /# Goal\n\nу меня поиск запущен/.test(g), g.split('\n').slice(0, 3).join(' / '))
 }
 
 {
