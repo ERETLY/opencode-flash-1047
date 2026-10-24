@@ -1,14 +1,14 @@
 ﻿# flash 1047 — Super Free
 
 [![release](https://img.shields.io/github/v/release/ERETLY/opencode-flash-1047?label=release)](https://github.com/ERETLY/opencode-flash-1047/releases)
-[![tests](https://img.shields.io/badge/tests-119%2F119-brightgreen)](#tests-and-evidence)
+[![tests](https://img.shields.io/badge/tests-123%2F123-brightgreen)](#tests-and-evidence)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![opencode](https://img.shields.io/badge/OpenCode-2.x-black)](https://opencode.ai)
 
 A free **310K-context** `deepseek-v4.1-flash-free` entry for **OpenCode 2.x**, plus the plugin that
 keeps multi-hour sessions from dying, drifting, or quietly getting dumber.
 
-**Version:** v1.6.2 · **Status:** stable — 119/119 unit tests, the compaction/pruning core
+**Version:** v1.6.3 · **Status:** stable — 123/123 unit tests, the compaction/pruning core
 live-verified on OpenCode 2.1.3 · **Cost:** $0 · **Scope:** one provider, one model id, nothing else
 is touched.
 
@@ -387,7 +387,7 @@ the event name:
 | `warn` / `warn-rearm` | level entered / log re-armed after a drop | `key`, `ratio`, `mode` |
 | `note-strip` | a stale pressure note was removed | `removed` |
 | `anchor` | post-compaction re-anchor injected | `task` |
-| `goal-addition` | a message was classified as context, not a task | `chars`, `additions` |
+| `goal-addition` | a message was classified as context, not a task (or an early addition was promoted once a task existed) | `chars`, `additions`, `reason` |
 | `retry*` | `retry-hook`, `retry`, `retry-fatal`, `retry-giveup` | `status`, `reason`, `delay`, `budget` |
 | `transport-fail` | stream died mid-flight | `count`, `status` |
 | `resume*` | `resume`, `resume-sent`, `resume-skip`, `resume-capped` | `reason` |
@@ -401,7 +401,7 @@ A healthy long session looks like: steady `calibrate` lines with `cal` between 0
 **Is the version I installed the version that is running?** Look at the `setup` line:
 
 ```json
-{"at":"setup","plugin":"1.6.2","pid":17136,"guarded":"flash1047/deepseek-v4.1-flash-free", ...}
+{"at":"setup","plugin":"1.6.3","pid":17136,"guarded":"flash1047/deepseek-v4.1-flash-free", ...}
 ```
 
 A `setup` line **without** `plugin` is a different build still held in memory. The runtime re-reads the
@@ -418,7 +418,7 @@ node --experimental-strip-types test/resilience.test.mjs   # Node >= 22.6, no de
 ```
 
 `test/resilience.test.mjs` drives the plugin through a fake session and a fake event stream, so
-behaviour is asserted rather than eyeballed. **Last run: 119 / 119 passed.**
+behaviour is asserted rather than eyeballed. **Last run: 123 / 123 passed.**
 
 | area | asserted |
 |---|---|
@@ -432,7 +432,7 @@ behaviour is asserted rather than eyeballed. **Last run: 119 / 119 passed.**
 | compaction note | exactly one appended user message, existing messages byte-identical, task/tools/files/last step preserved, the user's own words, a ranged read as `file:from-to`, commands verbatim, the anti-paraphrase instruction |
 | compaction recovery | a failure raises the backoff (720 000 ms after two), emergency mode turns on, no request while the backoff holds, old assistant text is cut, the handoff note carries the task, a successful compaction resets the mode |
 | goal file | the task is written, a nudge does not replace it, every ask is kept verbatim |
-| **one goal** | an informational message does not replace the goal, it lands in `## Additions`, the anchor quotes the task and carries the addition as context, an extension does not consume another requirement slot, the longest version wins, a genuinely new requirement is appended, an addition with no task on record still becomes the goal, a reworded requirement is not duplicated in the compaction note |
+| **one goal** | an informational message does not replace the goal, it lands in `## Additions`, the anchor quotes the task and carries the addition as context, six additions are all kept, an addition sent before the task is promoted out of the goal and out of the requirements, an extension does not consume another requirement slot, the longest version wins, a genuinely new requirement is appended, an addition with no task on record still becomes the goal, a reworded requirement is not duplicated in the compaction note |
 | re-anchor | one system part, quotes the task, injected once |
 | retry | 5xx/429/transport retried, invalid-request not retried, gives up after 5 resets, "Model is unavailable" not retried and not resumed |
 | switching | `switchModel` is never called |
@@ -539,7 +539,7 @@ retries. The failure modes it cannot remove are the free pool's latency and load
 ```
 plugin/resilience/index.ts    the OpenCode v2 plugin
 instructions/long-session.md  long-session rules, loaded via the `instructions` array
-test/resilience.test.mjs      regression suite (119 assertions, no dependencies)
+test/resilience.test.mjs      regression suite (123 assertions, no dependencies)
 opencode.snippet.jsonc        reference config fragment (provider + plugin + compaction + instructions)
 scripts/apply-config.js       idempotent config merge + plugin and rules copy (node)
 install.ps1 / install.sh      convenience installers
@@ -577,11 +577,17 @@ Limits worth knowing before you build on it:
 
 ## This release
 
-**v1.6.2 — stable.** One build; nothing about history is needed to use it.
+**v1.6.3 — stable.** One build; nothing about history is needed to use it.
 
 - **One goal.** An informational message ("у меня поиск запущен, просто чтобы ты знал") is context,
   not a task: it goes to `## Additions` in `goal.md` and is quoted after compaction as context that
   must not be swapped for the goal.
+- **Context is not evicted.** Up to twelve additions are kept, so a long session does not silently
+  lose the note you asked it to remember; when the anchor or the compaction note can only quote the
+  last two, they say how many earlier ones are on disk.
+- **An early addition is promoted, not mistaken for the task.** If context arrives before any task
+  exists it becomes the goal because it is the only intent on record; the first real task then moves
+  it to `## Additions` and out of `## Requirements`.
 - **A rewritten requirement replaces the old one.** Extending a demand keeps one entry instead of
   eating another of the four slots; the longest version wins, and a genuinely new demand is appended.
 - A compaction failure is no longer retried into a storm: the cooldown is measured from the failure
@@ -594,8 +600,9 @@ Limits worth knowing before you build on it:
 - `.omo/goal.md` keeps the task, those asks, the additions and your last nudge on disk.
 - After compaction the session continues by itself instead of waiting for "continue".
 - Context pressure asks for full quality and targeted reads, not short answers.
-- 119 assertions; the compaction/pruning core live-verified on OpenCode 2.1.3, the goal/additions
-  classification verified against a real chat that exhibited the failure.
+- 123 assertions; the compaction/pruning core live-verified on OpenCode 2.1.3, the goal/additions
+  classification verified against a real chat that exhibited the failure and a five-scenario survival
+  probe (anchor, note, disk, twelve-slot cap, pre-task promotion).
 
 ## License
 

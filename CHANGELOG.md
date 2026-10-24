@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.6.3 – 2026-10-24
+
+Context the user asked to keep in mind now survives a long session.
+
+### Fixed
+
+- **Additions are no longer capped at four.** The requirement list keeps four slots, which is right
+  for a summary, but the additions were written through the same function: a fifth informational
+  message silently pushed the oldest one out. A five-scenario probe (anchor, compaction note,
+  `goal.md`, cap, ordering) showed the loss. Additions now have their own window of twelve, and when
+  the anchor or the note can only quote the last two they name how many earlier ones are on disk.
+- **An addition that arrives before the task is promoted once the task exists.** It becomes the goal
+  because it is the only intent on record, but the first real task left it sitting in
+  `## Requirements`, where it read as a second demand and the post-compaction summary would carry it
+  as one. On the first real task such a goal moves to `## Additions`, leaves the requirement list,
+  and the move is logged as `goal-addition` with `reason: "promoted-from-goal"`.
+
+### Tests
+
+123 assertions (was 119): six additions are all kept with the oldest intact, a pre-task addition is
+promoted out of the goal and out of the requirements, and the promotion is logged.
+
 ## v1.6.2 – 2026-10-24
 
 One goal, and a rewrite that replaces instead of piling up.

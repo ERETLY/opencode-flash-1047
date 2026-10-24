@@ -10,7 +10,7 @@ const WIDE_PER_TOKEN = 2.0
 const PLUGIN_ID = 'omni-resilience'
 // Stamped into every `setup` log line, so "is the version I installed actually the version that
 // is running?" is answerable from the log instead of from the file hash.
-const VERSION = '1.6.2'
+const VERSION = '1.6.3'
 
 // Errors that neither a retry nor a resume prompt can fix: a wrong credential, a missing route or a
 // model id the gateway does not know. The old pattern `model.unavailable` matched exactly one
@@ -194,17 +194,22 @@ const sameAsk = (a: string, b: string): boolean => {
 
 // Append without duplicating a requirement the user already wrote. The longer version wins,
 // because the extension is usually where the detail lives.
-const pushAsk = (list: any, t: string): string[] => {
+//
+// The cap differs by list on purpose. Requirements are four slots because a summary cannot carry
+// more and older asks are superseded anyway. Additions are standing context the user explicitly
+// asked to be kept in mind, so dropping them silently is a loss - they get a much wider window.
+const pushAsk = (list: any, t: string, cap = 4): string[] => {
   const out: string[] = Array.isArray(list) ? list.slice() : []
   for (let i = out.length - 1; i >= 0; i--) {
     if (sameAsk(out[i], t)) {
       out[i] = t.length > out[i].length ? t : out[i]
-      return out.slice(-4)
+      return out.slice(-cap)
     }
   }
   out.push(t)
-  return out.slice(-4)
+  return out.slice(-cap)
 }
+const ADDITIONS_CAP = 12
 
 export default {
   id: PLUGIN_ID,
@@ -597,9 +602,17 @@ export default {
           // without displacing the goal: the post-compaction anchor quotes s.goal, and pointing it
           // at an informational aside is how the model ends up continuing the wrong work.
           s.lastInstruction = t.slice(0, 200)
-          s.additions = pushAsk(Array.isArray(s.additions) ? s.additions : [], t.slice(0, 600))
+          s.additions = pushAsk(Array.isArray(s.additions) ? s.additions : [], t.slice(0, 600), ADDITIONS_CAP)
           log({ at: 'goal-addition', sessionID: event.sessionID, chars: t.length, additions: s.additions.length })
         } else if (t) {
+          // An addition that arrived before any task had to be filed as the goal - it was the only
+          // intent on record. Now that real work exists it belongs in the additions, not in the
+          // requirement list where it would pose as the task.
+          if (isAddition(String(s.goal || '')) && String(s.goal || '').trim()) {
+            s.additions = pushAsk(Array.isArray(s.additions) ? s.additions : [], String(s.goal).slice(0, 600), ADDITIONS_CAP)
+            s.asks = (Array.isArray(s.asks) ? s.asks : []).filter((a: string) => !sameAsk(a, String(s.goal)))
+            log({ at: 'goal-addition', sessionID: event.sessionID, reason: 'promoted-from-goal', additions: s.additions.length })
+          }
           s.goal = t.slice(0, 1200)
           s.goalAt = Date.now()
           s.lastInstruction = ''
@@ -650,10 +663,10 @@ export default {
       if (s.anchor) {
         const goal = String(s.goal || s.lastPrompt || '').trim().slice(0, 800)
         const nudge = String(s.lastInstruction || '').trim().slice(0, 200)
-        const adds: string[] = (Array.isArray(s.additions) ? s.additions : [])
+        const allAdds: string[] = (Array.isArray(s.additions) ? s.additions : [])
           .map((a: string) => String(a || '').trim())
           .filter(Boolean)
-          .slice(-2)
+        const adds = allAdds.slice(-2)
         // The last instruction and the latest addition are usually the same message. Quoting it
         // twice costs tokens and reads like two separate demands.
         const nudgeIsAddition = !!nudge && adds.some((a) => sameAsk(a, nudge))
@@ -663,7 +676,10 @@ export default {
           (adds.length
             ? `Context they added on top of the task (hold in mind, NOT tasks - do not swap the goal for it): ${adds
                 .map((a) => `"${a}"`)
-                .join(' | ')}. `
+                .join(' | ')}. ` +
+              (allAdds.length > adds.length
+                ? `(${allAdds.length - adds.length} earlier addition${allAdds.length - adds.length === 1 ? '' : 's'} are in .omo/goal.md under "Additions" - read them there.) `
+                : '')
             : '') +
           (nudge && nudge !== goal && !nudgeIsAddition
             ? `Their last instruction was only "${nudge}" - that means carry on with the task above. `
@@ -1030,17 +1046,20 @@ export default {
         facts.errors = facts.errors.slice(-3)
       } catch {}
 
-      const goalAdds: string[] = (Array.isArray(s.additions) ? s.additions : [])
+      const allGoalAdds: string[] = (Array.isArray(s.additions) ? s.additions : [])
         .map((a: string) => String(a || '').trim())
         .filter(Boolean)
-        .slice(-2)
+      const goalAdds = allGoalAdds.slice(-2)
       const note =
         `[omni-resilience] Facts that MUST survive this compaction (session ${event.sessionID}). ` +
         (task ? `The user's TASK, verbatim: "${task}". ` : '') +
         (goalAdds.length
           ? `Context the user added on top of the task (hold in mind, NOT tasks): ${goalAdds
               .map((a) => `"${a}"`)
-              .join(' | ')}. `
+              .join(' | ')}. ` +
+            (allGoalAdds.length > goalAdds.length
+              ? `${allGoalAdds.length - goalAdds.length} earlier addition${allGoalAdds.length - goalAdds.length === 1 ? '' : 's'} are in .omo/goal.md under "Additions" - keep them. `
+              : '')
           : '') +
         (facts.asks.length
           ? `The user's own words, in order (these ARE the requirements): ${facts.asks.map((a) => `"${a}"`).join(' | ')}. `

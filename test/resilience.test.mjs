@@ -481,6 +481,41 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
 }
 
 {
+  // context the user asked to keep in mind must not be dropped silently after a few messages
+  const r = await rig()
+  await r.prompt('audit the checker so that we never lose a token across the chains')
+  for (let i = 1; i <= 6; i++) {
+    await r.prompt(`добавка номер ${i}: для информации, просто чтобы ты знал про деталь ${i}`)
+  }
+  const g = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  const sec = (g.split('## Additions')[1] || '').split('## Last instruction')[0]
+  const kept = [...sec.matchAll(/добавка номер (\d+)/g)].map((m) => Number(m[1]))
+  check(
+    'additions: six additions are all kept, the oldest is not evicted',
+    kept.length === 6 && kept.includes(1),
+    JSON.stringify(kept),
+  )
+}
+
+{
+  // an addition that arrived before any task was filed as the goal - once real work exists it
+  // belongs in the additions, not in the requirement list posing as the task
+  const r = await rig()
+  await r.prompt('у меня поиск запущен просто чтобы ты знал, что ошибки по прокси могут быть')
+  await r.prompt('audit the checker so that we never lose a token across the chains')
+  const g = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  const reqs = (g.split('## Requirements')[1] || '').split('## Additions')[0]
+  check(
+    'additions: a pre-task addition is promoted out of the goal',
+    /# Goal\n\naudit the checker so that we never lose a token/.test(g) && /## Additions[\s\S]*поиск запущен/.test(g),
+    g.split('\n').slice(0, 3).join(' / '),
+  )
+  check('additions: the promoted addition does not stay in requirements', !reqs.includes('поиск запущен'), reqs.trim().slice(0, 200))
+  const promoted = r.log().filter((x) => x.at === 'goal-addition' && x.reason === 'promoted-from-goal')
+  check('additions: the promotion is logged', promoted.length === 1, JSON.stringify(promoted))
+}
+
+{
   const r = await rig()
   await r.prompt('build the geophoto report')
   await r.emit('session.compaction.ended', {}, 1700)
