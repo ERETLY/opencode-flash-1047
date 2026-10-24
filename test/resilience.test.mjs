@@ -516,6 +516,25 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
 }
 
 {
+  // the newest addition is also the message that set lastInstruction: writing it twice, once under
+  // a heading called "Last instruction", makes context read like a command
+  const r = await rig()
+  const ADD = 'и да, у мя ща самого поиск запущен. просто чтобы ты знал, что мб ошибки будут хз по прокси'
+  await r.prompt('audit the checker so that we never lose a token across the chains')
+  await r.prompt(ADD)
+  const g = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  const last = (g.split('## Last instruction')[1] || '').split('---')[0]
+  check('additions: the newest addition is not repeated as a last instruction', !last.includes('поиск запущен'), last.trim().slice(0, 200))
+  check('additions: the file says plainly that it is context, not an instruction', /not an instruction/.test(last), last.trim().slice(0, 200))
+  await r.emit('session.compaction.ended', {}, 1700)
+  const sys = []
+  await r.context([], sys)
+  const a = sys[0]?.text || ''
+  const hits = (a.match(/поиск запущен/g) || []).length
+  check('additions: the anchor quotes it once, not twice', hits === 1, `hits=${hits}`)
+}
+
+{
   const r = await rig()
   await r.prompt('build the geophoto report')
   await r.emit('session.compaction.ended', {}, 1700)

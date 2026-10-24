@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.6.4 – 2026-10-24
+
+An addition is labelled once, as context.
+
+### Fixed
+
+- **The newest addition is no longer repeated as a "last instruction".** A message flagged as
+  context also becomes the session's last instruction, and `goal.md` wrote it under both headings.
+  The second copy sat under a label that reads like a command, which is the confusion the addition
+  tier exists to prevent. It is now written once, under `## Additions`, and the last-instruction
+  field says `(none - the newest addition above is context, not an instruction)`. The post-compaction
+  anchor already quoted it only once and still does.
+
+### Tests
+
+126 assertions (was 123): the newest addition is absent from the last-instruction section, the file
+says it is context and not an instruction, and the anchor quotes it exactly once.
+
 ## v1.6.3 – 2026-10-24
 
 Context the user asked to keep in mind now survives a long session.

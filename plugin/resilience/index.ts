@@ -10,7 +10,7 @@ const WIDE_PER_TOKEN = 2.0
 const PLUGIN_ID = 'omni-resilience'
 // Stamped into every `setup` log line, so "is the version I installed actually the version that
 // is running?" is answerable from the log instead of from the file hash.
-const VERSION = '1.6.3'
+const VERSION = '1.6.4'
 
 // Errors that neither a retry nor a resume prompt can fix: a wrong credential, a missing route or a
 // model id the gateway does not know. The old pattern `model.unavailable` matched exactly one
@@ -625,6 +625,13 @@ export default {
         // the post-compaction anchor points at it; the summary can lose it, the file cannot.
         try {
           fs.mkdirSync(path.join(root, '.omo'), { recursive: true })
+          // The newest addition is also the message that set lastInstruction. Writing it under a
+          // second heading labelled "Last instruction" makes context read like a command, which is
+          // exactly what the addition tier exists to prevent.
+          const lastInstr = String(s.lastInstruction || '').trim()
+          const lastIsAddition =
+            !!lastInstr &&
+            (Array.isArray(s.additions) ? s.additions : []).some((a: string) => sameAsk(a, lastInstr))
           fs.writeFileSync(
             path.join(root, '.omo', 'goal.md'),
             `# Goal\n\n${s.goal || '(not set yet)'}\n\n` +
@@ -632,7 +639,7 @@ export default {
               `${(Array.isArray(s.asks) && s.asks.length ? s.asks : []).map((a: string, i: number) => `${i + 1}. ${a}`).join('\n') || '(none yet)'}\n\n` +
               `## Additions (context to take into account, NOT tasks)\n\n` +
               `${(Array.isArray(s.additions) && s.additions.length ? s.additions : []).map((a: string, i: number) => `${i + 1}. ${a}`).join('\n') || '(none)'}\n\n` +
-              `## Last instruction\n\n${s.lastInstruction || '(none)'}\n\n---\n` +
+              `## Last instruction\n\n${lastInstr ? (lastIsAddition ? '(none - the newest addition above is context, not an instruction)' : lastInstr) : '(none)'}\n\n---\n` +
               `_Updated ${new Date().toISOString()} by omni-resilience (session ${event.sessionID}). ` +
               `This file is the task contract after compaction - edit it freely._\n`,
           )
