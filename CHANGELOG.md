@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.6.6 – 2026-10-24
+
+A launch line no longer becomes the goal.
+
+### Fixed
+
+- **"я запускаю chck4.cmd" was filed as a task.** The state-report tier recognised "у меня запущен"
+  and "я запустил", but not the present tense, so a message reporting that the user had launched
+  something replaced the audit that was already in progress. It is context now, filed under
+  `## Additions`. The weak tier still yields to an imperative: "я запускаю chck4.cmd, он падает -
+  почини" remains a task.
+
+### Tests
+
+134 assertions (was 132): a launch statement does not replace the goal, and a launch statement that
+asks for work stays the goal.
+
 ## v1.6.5 – 2026-10-24
 
 Taking a message back and rewriting it now replaces it.

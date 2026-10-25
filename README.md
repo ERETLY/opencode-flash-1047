@@ -1,14 +1,14 @@
 ﻿# flash 1047 — Super Free
 
 [![release](https://img.shields.io/github/v/release/ERETLY/opencode-flash-1047?label=release)](https://github.com/ERETLY/opencode-flash-1047/releases)
-[![tests](https://img.shields.io/badge/tests-132%2F132-brightgreen)](#tests-and-evidence)
+[![tests](https://img.shields.io/badge/tests-134%2F134-brightgreen)](#tests-and-evidence)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![opencode](https://img.shields.io/badge/OpenCode-2.x-black)](https://opencode.ai)
 
 A free **310K-context** `deepseek-v4.1-flash-free` entry for **OpenCode 2.x**, plus the plugin that
 keeps multi-hour sessions from dying, drifting, or quietly getting dumber.
 
-**Version:** v1.6.5 · **Status:** stable — 132/132 unit tests, the compaction/pruning core
+**Version:** v1.6.6 · **Status:** stable — 134/134 unit tests, the compaction/pruning core
 live-verified on OpenCode 2.1.3 · **Cost:** $0 · **Scope:** one provider, one model id, nothing else
 is touched.
 
@@ -419,7 +419,7 @@ node --experimental-strip-types test/resilience.test.mjs   # Node >= 22.6, no de
 ```
 
 `test/resilience.test.mjs` drives the plugin through a fake session and a fake event stream, so
-behaviour is asserted rather than eyeballed. **Last run: 132 / 132 passed.**
+behaviour is asserted rather than eyeballed. **Last run: 134 / 134 passed.**
 
 | area | asserted |
 |---|---|
@@ -433,7 +433,7 @@ behaviour is asserted rather than eyeballed. **Last run: 132 / 132 passed.**
 | compaction note | exactly one appended user message, existing messages byte-identical, task/tools/files/last step preserved, the user's own words, a ranged read as `file:from-to`, commands verbatim, the anti-paraphrase instruction |
 | compaction recovery | a failure raises the backoff (720 000 ms after two), emergency mode turns on, no request while the backoff holds, old assistant text is cut, the handoff note carries the task, a successful compaction resets the mode |
 | goal file | the task is written, a nudge does not replace it, every ask is kept verbatim |
-| **one goal** | an informational message does not replace the goal, it lands in `## Additions`, the anchor quotes the task and carries the addition as context, the newest addition is not repeated as a last instruction, the anchor quotes it once, six additions are all kept, an addition sent before the task is promoted out of the goal and out of the requirements, a reverted-and-rewritten addition replaces the old wording, a message still in history is not treated as an edit, a reverted-and-rewritten task replaces the old goal, an extension does not consume another requirement slot, the longest version wins, a genuinely new requirement is appended, an addition with no task on record still becomes the goal, a reworded requirement is not duplicated in the compaction note |
+| **one goal** | an informational message does not replace the goal, it lands in `## Additions`, a launch statement ("я запускаю X") does not replace it either, a launch statement with an imperative stays the goal, the anchor quotes the task and carries the addition as context, the newest addition is not repeated as a last instruction, the anchor quotes it once, six additions are all kept, an addition sent before the task is promoted out of the goal and out of the requirements, a reverted-and-rewritten addition replaces the old wording, a message still in history is not treated as an edit, a reverted-and-rewritten task replaces the old goal, an extension does not consume another requirement slot, the longest version wins, a genuinely new requirement is appended, an addition with no task on record still becomes the goal, a reworded requirement is not duplicated in the compaction note |
 | re-anchor | one system part, quotes the task, injected once |
 | retry | 5xx/429/transport retried, invalid-request not retried, gives up after 5 resets, "Model is unavailable" not retried and not resumed |
 | switching | `switchModel` is never called |
@@ -540,7 +540,7 @@ retries. The failure modes it cannot remove are the free pool's latency and load
 ```
 plugin/resilience/index.ts    the OpenCode v2 plugin
 instructions/long-session.md  long-session rules, loaded via the `instructions` array
-test/resilience.test.mjs      regression suite (132 assertions, no dependencies)
+test/resilience.test.mjs      regression suite (134 assertions, no dependencies)
 opencode.snippet.jsonc        reference config fragment (provider + plugin + compaction + instructions)
 scripts/apply-config.js       idempotent config merge + plugin and rules copy (node)
 install.ps1 / install.sh      convenience installers
@@ -578,7 +578,7 @@ Limits worth knowing before you build on it:
 
 ## This release
 
-**v1.6.5 — stable.** One build; nothing about history is needed to use it.
+**v1.6.6 — stable.** One build; nothing about history is needed to use it.
 
 - **One goal.** An informational message ("у меня поиск запущен, просто чтобы ты знал") is context,
   not a task: it goes to `## Additions` in `goal.md` and is quoted after compaction as context that
@@ -598,6 +598,9 @@ Limits worth knowing before you build on it:
   longer in history and the new one is the same kind (task or addition), the old entry is removed
   first, so a full rewrite - different words, different length - does not leave a stale copy beside
   it. A genuinely new message is still appended, because the previous one is still in the transcript.
+- **A launch line is status, not a new task.** "я запускаю chck4.cmd" (present tense) is recognised
+  the same way as "у меня запущен": it goes to `## Additions` and the audit already in progress stays
+  the goal. With an imperative attached ("я запускаю X, он падает - почини") it is a task again.
 - **A rewritten requirement replaces the old one.** Extending a demand keeps one entry instead of
   eating another of the four slots; the longest version wins, and a genuinely new demand is appended.
 - A compaction failure is no longer retried into a storm: the cooldown is measured from the failure
@@ -610,7 +613,7 @@ Limits worth knowing before you build on it:
 - `.omo/goal.md` keeps the task, those asks, the additions and your last nudge on disk.
 - After compaction the session continues by itself instead of waiting for "continue".
 - Context pressure asks for full quality and targeted reads, not short answers.
-- 132 assertions; the compaction/pruning core live-verified on OpenCode 2.1.3, the goal/additions
+- 134 assertions; the compaction/pruning core live-verified on OpenCode 2.1.3, the goal/additions
   classification verified against a real chat that exhibited the failure, a five-scenario survival
   probe (anchor, note, disk, twelve-slot cap, pre-task promotion) and a replay of the exact two
   messages from that chat.

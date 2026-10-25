@@ -548,6 +548,32 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
 }
 
 {
+  // "я запускаю X" is a status line, not a new task: it must not overwrite the audit that is
+  // already in progress. With an imperative attached it is still a task.
+  const r = await rig()
+  await r.prompt('сделай фулл аудит чекера и чистую стабильную версию')
+  await r.prompt('я запускаю "C:\\Users\\eretly\\Desktop\\Scripts\\Opencode\\CheckerCrypto\\chck4.cmd"')
+  const g = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  check(
+    'additions: a launch statement does not replace the goal',
+    /# Goal\n\nсделай фулл аудит чекера/.test(g) && /## Additions[\s\S]*я запускаю/.test(g),
+    g.split('\n').slice(0, 3).join(' / '),
+  )
+}
+
+{
+  const r = await rig()
+  await r.prompt('сделай фулл аудит чекера и чистую стабильную версию')
+  await r.prompt('я запускаю chck4.cmd, он падает на Litecoin - почини')
+  const g = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  check(
+    'additions: a launch statement that asks for work stays the goal',
+    /# Goal\n\nя запускаю chck4\.cmd, он падает/.test(g) && !/## Additions[\s\S]*почини/.test(g),
+    g.split('\n').slice(0, 3).join(' / '),
+  )
+}
+
+{
   // a message the user reverted and rewrote before any answer is one intent, not two: the rewrite
   // replaces the entry the first version produced. The reverted message is gone from the transcript.
   const reverted = {

@@ -10,7 +10,7 @@ const WIDE_PER_TOKEN = 2.0
 const PLUGIN_ID = 'omni-resilience'
 // Stamped into every `setup` log line, so "is the version I installed actually the version that
 // is running?" is answerable from the log instead of from the file hash.
-const VERSION = '1.6.5'
+const VERSION = '1.6.6'
 
 // Errors that neither a retry nor a resume prompt can fix: a wrong credential, a missing route or a
 // model id the gateway does not know. The old pattern `model.unavailable` matched exactly one
@@ -161,7 +161,8 @@ const isContinuation = (t: string): boolean => {
 // counts when no imperative is present.
 const ADDITION_STRONG_RE =
   /(?:чтобы ты (?:знал|понимал|учитывал|имел в виду)|просто (?:знай|имей в виду)|имей в виду|для информации|к сведению|на заметку|не как задание)/i
-const ADDITION_WEAK_RE = /(?:у меня (?:сейчас )?(?:запущ|идёт|идет|работает)|я запустил|мой поиск)/i
+const ADDITION_WEAK_RE =
+  /(?:у меня (?:сейчас )?(?:запущ|идёт|идет|работает)|я запустил|я запускаю|я гоняю|мой поиск)/i
 const TASK_VERB_RE =
   /(?:почини|исправь|сделай|добавь|убери|удали|напиши|перепиши|замени|запусти|проверь|перепроверь|протестируй|найди|посмотри|разберись|обнови|построй|собери|отрефакторь|оптимизируй|настрой|сравни|посчитай|покажи)/i
 const isAddition = (t: string): boolean => {
