@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.6.8 – 2026-10-26
+
+Thresholds prefer the provider's real prompt size over the estimate.
+
+### Fixed
+
+- **A live session compacted on a 493k estimate while its real prompt was 178k.** `used` was
+  `estimate × cal`, and the estimator overcounts Cyrillic-heavy transcripts by more than a factor of
+  two. When the outgoing request already contains an assistant message with provider usage, that
+  reported size plus the tail after it is now used instead of the scaled estimate. The estimate
+  remains the fallback when no sample is present.
+- The `ctx` log line records `src: "real" | "est"`, so a decision can be checked against the number
+  the provider actually reported.
+
+### Tests
+
+137 assertions (was 136): a real prompt sample wins over the scaled estimate.
+
 ## v1.6.7 – 2026-10-26
 
 Calibration reads the transcript again.

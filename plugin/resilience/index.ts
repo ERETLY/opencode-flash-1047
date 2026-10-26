@@ -10,7 +10,7 @@ const WIDE_PER_TOKEN = 2.0
 const PLUGIN_ID = 'omni-resilience'
 // Stamped into every `setup` log line, so "is the version I installed actually the version that
 // is running?" is answerable from the log instead of from the file hash.
-const VERSION = '1.6.7'
+const VERSION = '1.6.8'
 
 // Errors that neither a retry nor a resume prompt can fix: a wrong credential, a missing route or a
 // model id the gateway does not know. The old pattern `model.unavailable` matched exactly one
@@ -113,6 +113,23 @@ const headTail = (s: string, head: number, tail: number) => {
     `Re-run the tool with grep/offset/limit if you need that part again.\n\n` +
     s.slice(-tail)
   )
+}
+
+// The provider reports the exact prompt size on every assistant message. When the outgoing request
+// already contains such a message, that number plus the tail after it is a measurement, not an
+// estimate - and the estimate can be far off on Cyrillic-heavy text where calibration cannot help
+// if it never receives a sample.
+const lastPromptUsage = (messages: any[]): { real: number; index: number } | null => {
+  if (!Array.isArray(messages)) return null
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m: any = messages[i]
+    const t = m?.tokens ?? m?.info?.tokens ?? m?.metadata?.tokens ?? m?.data?.tokens
+    if (t && typeof t.input === 'number') {
+      const real = Number(t.input || 0) + Number(t.cache?.read || 0) + Number(t.cache?.write || 0)
+      if (real > 1000) return { real, index: i }
+    }
+  }
+  return null
 }
 
 // The pressure note we append to an outgoing request. If the runtime keeps that array and hands it
@@ -820,7 +837,13 @@ export default {
       // shrink in proportion to the pruned share, so every later decision under-counted by the same
       // share and the 85% trigger fired far above the real ceiling.
       const cal = Number.isFinite(s.cal) && s.cal > 0 ? s.cal : 1
-      let used = Math.round(est * cal)
+      // A real sample in the outgoing request beats any estimate: the provider reported the prompt
+      // size on the last assistant message, so only the tail after it has to be estimated. This
+      // holds even when calibration cannot read the transcript or the text is hard to estimate.
+      const sample = lastPromptUsage(event.messages)
+      let used = sample
+        ? Math.round(sample.real + estimate(event.messages.slice(sample.index + 1)))
+        : Math.round(est * cal)
       let ratio = used / CFG.limit
 
       if (event.options) {
@@ -837,7 +860,7 @@ export default {
           toolMsgs += 1
           for (const p of m.content) if (p?.type === 'tool-result' && typeof p?.result?.value === 'string') toolChars += p.result.value.length
         }
-        log({ at: 'ctx', sessionID: event.sessionID, used, est, cal, ratio: Number(ratio.toFixed(3)), msgs: event.messages?.length, toolMsgs, toolChars })
+        log({ at: 'ctx', sessionID: event.sessionID, used, est, cal, src: sample ? 'real' : 'est', ratio: Number(ratio.toFixed(3)), msgs: event.messages?.length, toolMsgs, toolChars })
       }
 
       // ---- adaptive pruning of stale tool output (outgoing request only) ----

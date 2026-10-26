@@ -235,6 +235,23 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
 }
 
 {
+  // the provider's number on the last assistant message is a measurement: use it plus the tail,
+  // not the estimate multiplied by a ratio (live: estimate said 493k while the prompt was 178k)
+  const r = await rig()
+  await r.context([
+    { role: 'user', content: [{ type: 'text', text: 'audit the checker' }] },
+    {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'done' }],
+      tokens: { input: 1000, output: 20, cache: { read: 9000, write: 0 } },
+    },
+    { role: 'user', content: [{ type: 'text', text: 'x'.repeat(3600) }] }, // tail: ~1000 tokens
+  ])
+  const line = r.log().filter((l) => l.at === 'ctx').at(-1)
+  check('threshold: a real prompt sample wins over the scaled estimate', line?.src === 'real' && line?.used > 10500 && line?.used < 12000, JSON.stringify(line))
+}
+
+{
   // no sample yet and no readable tokens: the skip must be visible instead of silent
   const r = await rig({}, undefined, { context: async () => ({ messages: [{ role: 'assistant', content: [] }] }) })
   await r.prompt('audit the checker and verify every claim with real evidence')

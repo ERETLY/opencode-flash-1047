@@ -1,14 +1,14 @@
 ﻿# flash 1047 — Super Free
 
 [![release](https://img.shields.io/github/v/release/ERETLY/opencode-flash-1047?label=release)](https://github.com/ERETLY/opencode-flash-1047/releases)
-[![tests](https://img.shields.io/badge/tests-136%2F136-brightgreen)](#tests-and-evidence)
+[![tests](https://img.shields.io/badge/tests-137%2F137-brightgreen)](#tests-and-evidence)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![opencode](https://img.shields.io/badge/OpenCode-2.x-black)](https://opencode.ai)
 
 A free **310K-context** `deepseek-v4.1-flash-free` entry for **OpenCode 2.x**, plus the plugin that
 keeps multi-hour sessions from dying, drifting, or quietly getting dumber.
 
-**Version:** v1.6.7 · **Status:** stable — 136/136 unit tests, the compaction/pruning core
+**Version:** v1.6.8 · **Status:** stable — 137/137 unit tests, the compaction/pruning core
 live-verified on OpenCode 2.1.3 · **Cost:** $0 · **Scope:** one provider, one model id, nothing else
 is touched.
 
@@ -402,7 +402,7 @@ A healthy long session looks like: steady `calibrate` lines with `cal` between 0
 **Is the version I installed the version that is running?** Look at the `setup` line:
 
 ```json
-{"at":"setup","plugin":"1.6.7","pid":17136,"guarded":"flash1047/deepseek-v4.1-flash-free", ...}
+{"at":"setup","plugin":"1.6.8","pid":17136,"guarded":"flash1047/deepseek-v4.1-flash-free", ...}
 ```
 
 A `setup` line **without** `plugin` is a different build still held in memory. The runtime re-reads the
@@ -419,7 +419,7 @@ node --experimental-strip-types test/resilience.test.mjs   # Node >= 22.6, no de
 ```
 
 `test/resilience.test.mjs` drives the plugin through a fake session and a fake event stream, so
-behaviour is asserted rather than eyeballed. **Last run: 136 / 136 passed.**
+behaviour is asserted rather than eyeballed. **Last run: 137 / 137 passed.**
 
 | area | asserted |
 |---|---|
@@ -541,7 +541,7 @@ retries. The failure modes it cannot remove are the free pool's latency and load
 ```
 plugin/resilience/index.ts    the OpenCode v2 plugin
 instructions/long-session.md  long-session rules, loaded via the `instructions` array
-test/resilience.test.mjs      regression suite (136 assertions, no dependencies)
+test/resilience.test.mjs      regression suite (137 assertions, no dependencies)
 opencode.snippet.jsonc        reference config fragment (provider + plugin + compaction + instructions)
 scripts/apply-config.js       idempotent config merge + plugin and rules copy (node)
 install.ps1 / install.sh      convenience installers
@@ -579,7 +579,7 @@ Limits worth knowing before you build on it:
 
 ## This release
 
-**v1.6.7 — stable.** One build; nothing about history is needed to use it.
+**v1.6.8 — stable.** One build; nothing about history is needed to use it.
 
 - **One goal.** An informational message ("у меня поиск запущен, просто чтобы ты знал") is context,
   not a task: it goes to `## Additions` in `goal.md` and is quoted after compaction as context that
@@ -602,10 +602,10 @@ Limits worth knowing before you build on it:
 - **A launch line is status, not a new task.** "я запускаю chck4.cmd" (present tense) is recognised
   the same way as "у меня запущен": it goes to `## Additions` and the audit already in progress stays
   the goal. With an imperative attached ("я запускаю X, он падает - почини") it is a task again.
-- **Thresholds use real token samples again.** The transcript is read for `{tokens}` and
-  `{info:{tokens}}` alike; a missing sample is logged as `calibrate-skip` instead of being swallowed.
-  Without this, `cal` stayed at its default and compaction fired at an estimated 264k when the real
-  prompt was 214k.
+- **Thresholds use the provider's real prompt size when it is available.** `used` is the reported
+  `input + cache.read` of the last assistant message plus the tail after it, not an estimate
+  multiplied by a ratio. Live case: the estimate said 493k while the prompt was 178k, and the
+  session compacted on the estimate. The `ctx` log line now carries `src: "real" | "est"`.
 - **A rewritten requirement replaces the old one.** Extending a demand keeps one entry instead of
   eating another of the four slots; the longest version wins, and a genuinely new demand is appended.
 - A compaction failure is no longer retried into a storm: the cooldown is measured from the failure
@@ -618,7 +618,7 @@ Limits worth knowing before you build on it:
 - `.omo/goal.md` keeps the task, those asks, the additions and your last nudge on disk.
 - After compaction the session continues by itself instead of waiting for "continue".
 - Context pressure asks for full quality and targeted reads, not short answers.
-- 136 assertions; the compaction/pruning core live-verified on OpenCode 2.1.3, the goal/additions
+- 137 assertions; the compaction/pruning core live-verified on OpenCode 2.1.3, the goal/additions
   classification verified against a real chat that exhibited the failure, a five-scenario survival
   probe (anchor, note, disk, twelve-slot cap, pre-task promotion) and a replay of the exact two
   messages from that chat.
