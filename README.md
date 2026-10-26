@@ -8,7 +8,7 @@
 A free **310K-context** `deepseek-v4.1-flash-free` entry for **OpenCode 2.x**, plus the plugin that
 keeps multi-hour sessions from dying, drifting, or quietly getting dumber.
 
-**Version:** v1.6.8 · **Status:** stable — 137/137 unit tests, the compaction/pruning core
+**Version:** v1.6.9 · **Status:** stable — 137/137 unit tests, the compaction/pruning core
 live-verified on OpenCode 2.1.3 · **Cost:** $0 · **Scope:** one provider, one model id, nothing else
 is touched.
 
@@ -402,7 +402,7 @@ A healthy long session looks like: steady `calibrate` lines with `cal` between 0
 **Is the version I installed the version that is running?** Look at the `setup` line:
 
 ```json
-{"at":"setup","plugin":"1.6.8","pid":17136,"guarded":"flash1047/deepseek-v4.1-flash-free", ...}
+{"at":"setup","plugin":"1.6.9","pid":17136,"guarded":"flash1047/deepseek-v4.1-flash-free", ...}
 ```
 
 A `setup` line **without** `plugin` is a different build still held in memory. The runtime re-reads the
@@ -579,7 +579,7 @@ Limits worth knowing before you build on it:
 
 ## This release
 
-**v1.6.8 — stable.** One build; nothing about history is needed to use it.
+**v1.6.9 — stable.** One build; nothing about history is needed to use it.
 
 - **One goal.** An informational message ("у меня поиск запущен, просто чтобы ты знал") is context,
   not a task: it goes to `## Additions` in `goal.md` and is quoted after compaction as context that
@@ -602,10 +602,12 @@ Limits worth knowing before you build on it:
 - **A launch line is status, not a new task.** "я запускаю chck4.cmd" (present tense) is recognised
   the same way as "у меня запущен": it goes to `## Additions` and the audit already in progress stays
   the goal. With an imperative attached ("я запускаю X, он падает - почини") it is a task again.
-- **Thresholds use the provider's real prompt size when it is available.** `used` is the reported
-  `input + cache.read` of the last assistant message plus the tail after it, not an estimate
-  multiplied by a ratio. Live case: the estimate said 493k while the prompt was 178k, and the
-  session compacted on the estimate. The `ctx` log line now carries `src: "real" | "est"`.
+- **OpenCode owns compaction; the plugin does not summarise on an estimate.** Two token estimators
+  disagreed on live sessions (493k estimated vs 178k reported, then 350k vs ~50k), and each
+  disagreement cut history early. The plugin now prunes, warns, retries and re-anchors, while the
+  runtime compacts using its own real accounting. `ownCompact: true` restores the old behaviour.
+  When the plugin does read a real sample, `used` is the reported `input + cache.read` plus the tail,
+  and the `ctx` line carries `src: "real" | "est"`.
 - **A rewritten requirement replaces the old one.** Extending a demand keeps one entry instead of
   eating another of the four slots; the longest version wins, and a genuinely new demand is appended.
 - A compaction failure is no longer retried into a storm: the cooldown is measured from the failure

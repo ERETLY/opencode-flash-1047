@@ -271,7 +271,7 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   const warn = r.log().find((l) => l.at === 'warn' && l.key === 'compact')
   check('threshold: 82% is not even a compact warning', !warn, JSON.stringify(warn))
 
-  const r2 = await rig({ contextLimit: 100000 })
+  const r2 = await rig({ contextLimit: 100000, ownCompact: true })
   await r2.context([
     { role: 'user', content: [{ type: 'text', text: 'x'.repeat(280000) }] }, // 91.8%
     { role: 'assistant', content: [{ type: 'text', text: 'working' }] },
@@ -791,7 +791,7 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   // regression: 2.1.2 answers "Nothing to compact yet" when keep swallows the history. The old
   // code reset the cooldown, so the next request retried and the session compacted every turn.
   let attempts = 0
-  const r = await rig({ contextLimit: 100000 }, undefined, {
+  const r = await rig({ contextLimit: 100000, ownCompact: true }, undefined, {
     compact: async () => {
       attempts += 1
       throw new Error('Nothing to compact yet')

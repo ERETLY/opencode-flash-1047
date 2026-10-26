@@ -10,7 +10,7 @@ const WIDE_PER_TOKEN = 2.0
 const PLUGIN_ID = 'omni-resilience'
 // Stamped into every `setup` log line, so "is the version I installed actually the version that
 // is running?" is answerable from the log instead of from the file hash.
-const VERSION = '1.6.8'
+const VERSION = '1.6.9'
 
 // Errors that neither a retry nor a resume prompt can fix: a wrong credential, a missing route or a
 // model id the gateway does not know. The old pattern `model.unavailable` matched exactly one
@@ -253,6 +253,11 @@ export default {
     const opts = ctx.options ?? {}
     const CFG = {
       limit: Number(opts.contextLimit ?? DEFAULTS.contextLimit),
+      // Compaction is owned by OpenCode by default: it has the provider's real token accounting,
+      // while this plugin only estimates. Two estimators disagreeing caused repeated early
+      // compactions (live: 493k estimated vs 178k reported, then 350k vs ~50k). The plugin still
+      // prunes, warns, retries and re-anchors; it just does not summarise on a guess.
+      ownCompact: Boolean(opts.ownCompact),
       warn: Number(opts.warn ?? DEFAULTS.warn),
       compact: Number(opts.compact ?? DEFAULTS.compact),
       hard: Number(opts.hard ?? DEFAULTS.hard),
@@ -1062,6 +1067,13 @@ export default {
         s.compacting = true
         s.lastCompactAt = Date.now()
         s.compactingSince = Date.now()
+        if (!CFG.ownCompact) {
+          if (!s.compactDelegated) {
+            s.compactDelegated = true
+            log({ at: 'compact-delegated', sessionID: event.sessionID, used })
+          }
+          return
+        }
         log({ at: 'compact-request', sessionID: event.sessionID, used })
         // compact() can throw synchronously (2.1.2 does exactly that when there is nothing to
         // compact); inside a hook that becomes a run-killing error, so always route it through
