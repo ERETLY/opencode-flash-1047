@@ -212,6 +212,38 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   check('calibrate: a sharp content shift moves the ratio faster', lines.at(-1)?.jump === true && Math.abs((lines.at(-1)?.cal ?? 0) - 0.7819) < 0.001, JSON.stringify(lines.at(-1)))
 }
 
+{
+  // the transcript has been returned both flat ({tokens}) and wrapped ({info:{tokens}}). Reading
+  // only the flat shape made every sample vanish silently and left `cal` at a stale default, so
+  // compaction fired ~18% early.
+  const r = await rig({}, undefined, {
+    context: async () => ({
+      messages: [
+        {
+          role: 'assistant',
+          info: { id: 'm9', tokens: { input: 1000, output: 5, cache: { read: 9000, write: 0 } } },
+          content: [{ type: 'text', text: 'done' }],
+        },
+      ],
+    }),
+  })
+  const msgs = [{ role: 'user', content: [{ type: 'text', text: 'x'.repeat(24000) }] }] // estimate 6 666
+  await r.context(msgs)
+  await r.emit('session.tool.success', { id: 'w1', name: 'shell' })
+  const line = r.log().filter((l) => l.at === 'calibrate').at(-1)
+  check('calibrate: wrapped messages ({info:{tokens}}) are still sampled', line?.real === 10000, JSON.stringify(line))
+}
+
+{
+  // no sample yet and no readable tokens: the skip must be visible instead of silent
+  const r = await rig({}, undefined, { context: async () => ({ messages: [{ role: 'assistant', content: [] }] }) })
+  await r.prompt('audit the checker and verify every claim with real evidence')
+  await r.context([{ role: 'user', content: [{ type: 'text', text: 'x'.repeat(40000) }] }])
+  await r.emit('session.tool.success', { id: 'z1', name: 'shell' })
+  const skip = r.log().find((l) => l.at === 'calibrate-skip')
+  check('calibrate: an unreadable sample is logged, not swallowed', skip?.reason === 'no-tokens', JSON.stringify(skip))
+}
+
 // ---------------------------------------------------------------- compaction threshold 85%
 {
   const big = 'x'.repeat(250000) // estimate 69 444 -> calibrated 81 944 of 100 000 = 81.9%

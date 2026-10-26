@@ -10,7 +10,7 @@ const WIDE_PER_TOKEN = 2.0
 const PLUGIN_ID = 'omni-resilience'
 // Stamped into every `setup` log line, so "is the version I installed actually the version that
 // is running?" is answerable from the log instead of from the file hash.
-const VERSION = '1.6.6'
+const VERSION = '1.6.7'
 
 // Errors that neither a retry nor a resume prompt can fix: a wrong credential, a missing route or a
 // model id the gateway does not know. The old pattern `model.unavailable` matched exactly one
@@ -322,7 +322,7 @@ export default {
           goal: '',
           additions: [],
           lastInstruction: '',
-          cal: 1.18, // measured default: real prompt tokens / estimate on this endpoint
+          cal: 1.18, // measured default; calibration replaces it with real samples
           calN: 0,
           prevEst: 0,
           lastReal: 0,
@@ -457,14 +457,24 @@ export default {
         let tk: any = null
         let msgKey = ''
         for (let i = msgs.length - 1; i >= 0; i--) {
-          const t = msgs[i]?.tokens
+          const m: any = msgs[i]
+          // The transcript has been returned both flat ({tokens}) and wrapped ({info:{tokens}})
+          // across runtime versions. Reading only the flat shape made every sample vanish
+          // silently, leaving `cal` at its default and compacting ~18% early.
+          const t = m?.tokens ?? m?.info?.tokens ?? m?.metadata?.tokens ?? m?.data?.tokens
           if (t && typeof t.input === 'number') {
             tk = t
-            msgKey = String(msgs[i]?.id ?? msgs[i]?.time?.completed ?? msgs[i]?.time?.created ?? '')
+            msgKey = String(m?.id ?? m?.info?.id ?? m?.time?.completed ?? m?.time?.created ?? '')
             break
           }
         }
-        if (!tk) return
+        if (!tk) {
+          if (!s.calSkipLogged) {
+            s.calSkipLogged = true
+            log({ at: 'calibrate-skip', sessionID, reason: 'no-tokens', msgs: msgs.length })
+          }
+          return
+        }
         // cached prompt tokens are reported separately from the non-cached `input`
         const real = Number(tk.input || 0) + Number(tk.cache?.read || 0) + Number(tk.cache?.write || 0)
         if (!Number.isFinite(real) || real < 1000) return

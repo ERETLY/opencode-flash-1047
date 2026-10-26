@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.6.7 – 2026-10-26
+
+Calibration reads the transcript again.
+
+### Fixed
+
+- **Real token samples stopped being recorded, so every threshold used a stale multiplier.**
+  `refreshCalibration` looked for `tokens` only on the top level of each transcript message. The
+  runtime now returns them wrapped (`{info:{tokens}}`), so every sample was dropped without a word
+  and `cal` stayed at its default 1.18. Measured live: a session compacted at an estimated 264 449
+  tokens while the provider reported `input 1 284 + cache.read 212 480 = 213 764` — about 23% early,
+  losing ~100k of usable history. Both shapes are read now.
+- **A dropped sample is no longer silent.** If no message carries token counts, the plugin logs
+  `calibrate-skip` with `reason: "no-tokens"` once per session, so the failure is visible instead of
+  hiding behind a plausible-looking ratio.
+
+### Tests
+
+136 assertions (was 134): a wrapped `{info:{tokens}}` message is still sampled, and an unreadable
+sample is logged rather than swallowed.
+
 ## v1.6.6 – 2026-10-24
 
 A launch line no longer becomes the goal.
