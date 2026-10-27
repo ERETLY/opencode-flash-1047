@@ -1,5 +1,28 @@
 ﻿# Changelog
 
+## v1.7.0 – 2026-10-27
+
+The goal file is per session, so two chats in one folder cannot overwrite each other.
+
+### Fixed
+
+- **goal.md was one file per directory.** Two chats in the same folder wrote the same path, and
+  after a compaction the older chat was told to `read .omo/goal.md` - which by then held the other
+  chat's task. The goal is now written to `.omo/goal.<sessionID>.md`, and every reference follows
+  it: the compaction anchor, the earlier-additions hints, the resume prompt and the auto-continue
+  prompt. `.omo/goal.md` is still written as a mirror of the last active session, so anything that
+  reads the old path keeps working.
+
+### Changed
+
+- Dead state-file plumbing left over from 1.6.10 removed (two empty `stateText` blocks and the
+  `state` field in the compaction log line).
+
+### Tests
+
+139 assertions (was 137): a per-session copy exists and matches the mirror, and the auto-continue
+prompt points at the session file.
+
 ## v1.6.10 – 2026-10-27
 
 The plugin no longer tells the model to keep a `.omo/state.md`.

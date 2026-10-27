@@ -10,7 +10,7 @@ const WIDE_PER_TOKEN = 2.0
 const PLUGIN_ID = 'omni-resilience'
 // Stamped into every `setup` log line, so "is the version I installed actually the version that
 // is running?" is answerable from the log instead of from the file hash.
-const VERSION = '1.6.10'
+const VERSION = '1.7.0'
 
 // Errors that neither a retry nor a resume prompt can fix: a wrong credential, a missing route or a
 // model id the gateway does not know. The old pattern `model.unavailable` matched exactly one
@@ -114,6 +114,10 @@ const headTail = (s: string, head: number, tail: number) => {
     s.slice(-tail)
   )
 }
+
+// The goal file is per session: two chats in one folder must not read each other's task after a
+// compaction. `goal.md` is only a mirror of whichever session wrote last.
+const goalRef = (sessionID: string): string => `.omo/goal.${sessionID}.md`
 
 // The provider reports the exact prompt size on every assistant message. When the outgoing request
 // already contains such a message, that number plus the tail after it is a measurement, not an
@@ -635,7 +639,7 @@ export default {
           text:
             `The previous turn stopped unexpectedly (${reason}). Continue EXACTLY where you left off. ` +
             (task ? `Your task, verbatim from the user: "${task}". ` : '') +
-            `Do not restart the task and do not repeat finished work. Read .omo/goal.md and the latest checkpoint if it exists, ` +
+            `Do not restart the task and do not repeat finished work. Read ${goalRef(sessionID)} and the latest checkpoint if it exists, ` +
             `then perform the next unfinished step. If a tool call failed, retry it or pick an alternative.`,
         })
         log({ at: 'resume-sent', sessionID, attempt: s.resumes })
@@ -747,8 +751,7 @@ export default {
           const lastIsAddition =
             !!lastInstr &&
             (Array.isArray(s.additions) ? s.additions : []).some((a: string) => sameAsk(a, lastInstr))
-          fs.writeFileSync(
-            path.join(root, '.omo', 'goal.md'),
+          const goalBody =
             `# Goal\n\n${s.goal || '(not set yet)'}\n\n` +
               `## Requirements (the user's own words, oldest first)\n\n` +
               `${(Array.isArray(s.asks) && s.asks.length ? s.asks : []).map((a: string, i: number) => `${i + 1}. ${a}`).join('\n') || '(none yet)'}\n\n` +
@@ -756,8 +759,15 @@ export default {
               `${(Array.isArray(s.additions) && s.additions.length ? s.additions : []).map((a: string, i: number) => `${i + 1}. ${a}`).join('\n') || '(none)'}\n\n` +
               `## Last instruction\n\n${lastInstr ? (lastIsAddition ? '(none - the newest addition above is context, not an instruction)' : lastInstr) : '(none)'}\n\n---\n` +
               `_Updated ${new Date().toISOString()} by omni-resilience (session ${event.sessionID}). ` +
-              `This file is the task contract after compaction - edit it freely._\n`,
-          )
+              `This file is the task contract after compaction - edit it freely._\n`
+          // One goal file per session. Two chats open in the same folder used to overwrite the same
+          // goal.md, so after a compaction one chat was told to read the other chat's task. The
+          // session copy is authoritative; goal.md stays as a mirror of the last active chat.
+          const sessGoal = path.join(root, '.omo', `goal.${event.sessionID}.md`)
+          fs.writeFileSync(sessGoal, goalBody)
+          try {
+            fs.copyFileSync(sessGoal, path.join(root, '.omo', 'goal.md'))
+          } catch {}
         } catch {}
         s.resumes = 0
         s.lastResumeAt = 0
@@ -800,13 +810,13 @@ export default {
                 .map((a) => `"${a}"`)
                 .join(' | ')}. ` +
               (allAdds.length > adds.length
-                ? `(${allAdds.length - adds.length} earlier addition${allAdds.length - adds.length === 1 ? '' : 's'} are in .omo/goal.md under "Additions" - read them there.) `
+                ? `(${allAdds.length - adds.length} earlier addition${allAdds.length - adds.length === 1 ? '' : 's'} are in ${goalRef(event.sessionID)} under "Additions" - read them there.) `
                 : '')
             : '') +
           (nudge && nudge !== goal && !nudgeIsAddition
             ? `Their last instruction was only "${nudge}" - that means carry on with the task above. `
             : '') +
-          `Before anything else, read .omo/goal.md, then take the next unfinished step. ` +
+          `Before anything else, read ${goalRef(event.sessionID)}, then take the next unfinished step. ` +
           `Do not restart the task, do not ask the user to repeat anything, and do not invent new work. ` +
           `If the summary disagrees with the task above, the task above wins.`
         event.system.push({ type: 'text', text })
@@ -955,12 +965,8 @@ export default {
             s.estimatedTokens = used
             log({ at: 'emergency-trim', sessionID: event.sessionID, saved, messages: touched, used, ratio: Number(ratio.toFixed(3)), fails: s.compactFails })
           }
-          // The trimmed-away turns are gone for good, so the goal and the state file travel in the
-          // request instead of a summary that was never written.
-          let stateText = ''
-          try {
-            stateText = ''
-          } catch {}
+          // The trimmed-away turns are gone for good, so the goal travels in the request instead of a
+          // summary that was never written.
           const goal = String(s.goal || s.lastInstruction || '').trim().slice(0, 400)
           event.messages.push({
             role: 'user',
@@ -972,7 +978,7 @@ export default {
                   'this session, so older turns were shortened to keep the request inside the context limit; the ' +
                   'recent tail is intact. ' +
                   (goal ? `The task is: "${goal}". ` : '') +
-                  'Read .omo/goal.md before continuing, then take the next unfinished step. ' +
+                  `Read ${goalRef(event.sessionID)} before continuing, then take the next unfinished step. ` +
                   'Do not restart the task and do not invent new work.' +
                   '',
               },
@@ -1099,10 +1105,6 @@ export default {
     await ctx.session.hook('compaction', (event: any) => {
       const s = get(event.sessionID)
       if (!ours(s)) return
-      let stateText = ''
-      try {
-        stateText = ''
-      } catch {}
       const task = String(s.goal || s.lastPrompt || '').trim().slice(0, 1500)
       const recent = (s.recent || []).slice(-6).join(', ') || 'none'
 
@@ -1193,7 +1195,7 @@ export default {
               .map((a) => `"${a}"`)
               .join(' | ')}. ` +
             (allGoalAdds.length > goalAdds.length
-              ? `${allGoalAdds.length - goalAdds.length} earlier addition${allGoalAdds.length - goalAdds.length === 1 ? '' : 's'} are in .omo/goal.md under "Additions" - keep them. `
+              ? `${allGoalAdds.length - goalAdds.length} earlier addition${allGoalAdds.length - goalAdds.length === 1 ? '' : 's'} are in ${goalRef(event.sessionID)} under "Additions" - keep them. `
               : '')
           : '') +
         (facts.asks.length
@@ -1228,7 +1230,6 @@ export default {
           at: 'compaction-note',
           sessionID: event.sessionID,
           injected: true,
-          state: stateText.length,
           target,
         })
       } catch (e: any) {
@@ -1476,7 +1477,7 @@ export default {
                       sessionID: id,
                       text:
                         '[omni-resilience] Continue the task now. Do not summarise and do not stop to ask. ' +
-                        'Read .omo/goal.md, then take the next unfinished step.',
+                        `Read ${goalRef(id)}, then take the next unfinished step.`,
                     })
                     log({ at: 'auto-continue', sessionID: id, attempt: cur.autoContinues })
                   } catch (e: any) {

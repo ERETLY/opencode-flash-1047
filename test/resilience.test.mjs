@@ -441,6 +441,11 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
     g3.includes('write the long report about solana') && g3.includes('only check wallets above 1000'),
     g3.split('\n').slice(0, 8).join(' / '),
   )
+  // Two chats in one folder must not overwrite each other: the session copy is authoritative and
+  // goal.md is only a mirror of the last writer.
+  const own = path.join(r.root, '.omo', 'goal.ses_test.md')
+  check('goal file: a per-session copy exists', fs.existsSync(own), own)
+  check('goal file: the session copy matches the mirror', fs.existsSync(own) && fs.readFileSync(own, 'utf8') === g3)
 }
 
 // ------------------------------------------------------- one goal, additions marked as additions
@@ -680,7 +685,7 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   await r.prompt('build the geophoto report')
   await r.emit('session.compaction.ended', {}, 1700)
   check('auto-continue: one prompt after compaction', r.calls.prompt.length === 1, `prompts=${r.calls.prompt.length}`)
-  check('auto-continue: the prompt points at goal.md', String(r.calls.prompt[0] || '').includes('.omo/goal.md'))
+  check('auto-continue: the prompt points at the session goal file', String(r.calls.prompt[0] || '').includes('.omo/goal.ses_test.md'))
   await r.emit('session.compaction.ended', {}, 1700)
   check('auto-continue: respects the 60 s cooldown', r.calls.prompt.length === 1)
 }
