@@ -10,7 +10,7 @@ const WIDE_PER_TOKEN = 2.0
 const PLUGIN_ID = 'omni-resilience'
 // Stamped into every `setup` log line, so "is the version I installed actually the version that
 // is running?" is answerable from the log instead of from the file hash.
-const VERSION = '1.6.9'
+const VERSION = '1.6.10'
 
 // Errors that neither a retry nor a resume prompt can fix: a wrong credential, a missing route or a
 // model id the gateway does not know. The old pattern `model.unavailable` matched exactly one
@@ -635,7 +635,7 @@ export default {
           text:
             `The previous turn stopped unexpectedly (${reason}). Continue EXACTLY where you left off. ` +
             (task ? `Your task, verbatim from the user: "${task}". ` : '') +
-            `Do not restart the task and do not repeat finished work. Read .omo/state.md and the latest checkpoint if they exist, ` +
+            `Do not restart the task and do not repeat finished work. Read .omo/goal.md and the latest checkpoint if it exists, ` +
             `then perform the next unfinished step. If a tool call failed, retry it or pick an alternative.`,
         })
         log({ at: 'resume-sent', sessionID, attempt: s.resumes })
@@ -806,7 +806,7 @@ export default {
           (nudge && nudge !== goal && !nudgeIsAddition
             ? `Their last instruction was only "${nudge}" - that means carry on with the task above. `
             : '') +
-          `Before anything else, read .omo/goal.md and .omo/state.md, then take the next unfinished step. ` +
+          `Before anything else, read .omo/goal.md, then take the next unfinished step. ` +
           `Do not restart the task, do not ask the user to repeat anything, and do not invent new work. ` +
           `If the summary disagrees with the task above, the task above wins.`
         event.system.push({ type: 'text', text })
@@ -915,7 +915,7 @@ export default {
       // flash1047 cuts the summarisation stream, so compaction can fail again and again. After two
       // failures the plugin stops relying on it: every request above emergencyRatio gets its old
       // tool output and old assistant/reasoning text cut to a stub, the recent tail stays intact,
-      // and one handoff note keeps the goal and .omo/state.md visible. No model call happens here,
+      // and one handoff note keeps the goal visible. No model call happens here,
       // so there is nothing for the provider to truncate.
       if (s.compactFails >= 2 && ratio >= CFG.emergencyRatio && Array.isArray(event.messages)) {
         try {
@@ -959,7 +959,7 @@ export default {
           // request instead of a summary that was never written.
           let stateText = ''
           try {
-            stateText = fs.readFileSync(path.join(root, '.omo', 'state.md'), 'utf8').trim().slice(0, 1500)
+            stateText = ''
           } catch {}
           const goal = String(s.goal || s.lastInstruction || '').trim().slice(0, 400)
           event.messages.push({
@@ -972,9 +972,9 @@ export default {
                   'this session, so older turns were shortened to keep the request inside the context limit; the ' +
                   'recent tail is intact. ' +
                   (goal ? `The task is: "${goal}". ` : '') +
-                  'Read .omo/goal.md and .omo/state.md before continuing, then take the next unfinished step. ' +
+                  'Read .omo/goal.md before continuing, then take the next unfinished step. ' +
                   'Do not restart the task and do not invent new work.' +
-                  (stateText ? `\n\nCurrent .omo/state.md:\n${stateText}` : ''),
+                  '',
               },
             ],
           })
@@ -1016,17 +1016,17 @@ export default {
       if (ratio >= CFG.hard) {
         warn(
           'hard',
-          `[omni-resilience] Automatic note, not from the user. Context ${pct}% full. Close only the current step and write concrete state to .omo/state.md: files and paths, decisions, open TODOs, next step. Compaction follows immediately. Do not start new work in this turn and do not drop the task.`,
+          `[omni-resilience] Automatic note, not from the user. Context ${pct}% full. Close only the current step and close the step cleanly; the summary that follows must carry paths, decisions and the next step. Compaction follows immediately. Do not start new work in this turn and do not drop the task.`,
         )
       } else if (ratio >= CFG.compact) {
         warn(
           'compact',
-          `[omni-resilience] Automatic note, not from the user. Context ${pct}% full. Keep the same quality bar: verify claims before writing them and do not skip steps because the context is filling up. Write concrete findings to .omo/state.md - exact paths, line numbers, symbol names, decisions, next step - because a summary is about to replace the history and it must carry them. If you need an old file again, read a range (grep, offset/limit) instead of the whole file.`,
+          `[omni-resilience] Automatic note, not from the user. Context ${pct}% full. Keep the same quality bar: verify claims before writing them and do not skip steps because the context is filling up. Keep exact paths, line numbers, symbol names, decisions and the next step in the conversation, because a summary is about to replace the history and it must carry them. If you need an old file again, read a range (grep, offset/limit) instead of the whole file.`,
         )
       } else if (ratio >= CFG.warn) {
         warn(
           'warn',
-          `[omni-resilience] Automatic note, not from the user. Context ${pct}% full. Work at full quality: do not shorten answers, do not skip verification and do not skip steps because the context is filling up. Prefer targeted reads (grep, offset/limit) over re-reading whole files, and record findings - paths, line numbers, decisions, next step - in .omo/state.md so they survive compaction.`,
+          `[omni-resilience] Automatic note, not from the user. Context ${pct}% full. Work at full quality: do not shorten answers, do not skip verification and do not skip steps because the context is filling up. Prefer targeted reads (grep, offset/limit) over re-reading whole files, and keep findings - paths, line numbers, decisions, next step - in the conversation so they survive compaction.`,
         )
       }
 
@@ -1101,7 +1101,7 @@ export default {
       if (!ours(s)) return
       let stateText = ''
       try {
-        stateText = fs.readFileSync(path.join(root, '.omo', 'state.md'), 'utf8').slice(0, 2500)
+        stateText = ''
       } catch {}
       const task = String(s.goal || s.lastPrompt || '').trim().slice(0, 1500)
       const recent = (s.recent || []).slice(-6).join(', ') || 'none'
@@ -1210,7 +1210,7 @@ export default {
         `their reason, the open TODOs and the next concrete step. Do not paraphrase the user's requirements and do not ` +
         `replace concrete paths with descriptions like "the config file". ` +
         `Checkpoint: .omo/checkpoints/${event.sessionID}.json. ` +
-        (stateText ? `\n\nCurrent .omo/state.md:\n${stateText}` : '')
+        ''
       try {
         const msgs = event.messages
         let target = 'none'
@@ -1476,7 +1476,7 @@ export default {
                       sessionID: id,
                       text:
                         '[omni-resilience] Continue the task now. Do not summarise and do not stop to ask. ' +
-                        'Read .omo/goal.md and .omo/state.md, then take the next unfinished step.',
+                        'Read .omo/goal.md, then take the next unfinished step.',
                     })
                     log({ at: 'auto-continue', sessionID: id, attempt: cur.autoContinues })
                   } catch (e: any) {

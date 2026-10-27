@@ -8,7 +8,7 @@
 A free **310K-context** `deepseek-v4.1-flash-free` entry for **OpenCode 2.x**, plus the plugin that
 keeps multi-hour sessions from dying, drifting, or quietly getting dumber.
 
-**Version:** v1.6.9 · **Status:** stable — 137/137 unit tests, the compaction/pruning core
+**Version:** v1.6.10 · **Status:** stable — 137/137 unit tests, the compaction/pruning core
 live-verified on OpenCode 2.1.3 · **Cost:** $0 · **Scope:** one provider, one model id, nothing else
 is touched.
 
@@ -402,7 +402,7 @@ A healthy long session looks like: steady `calibrate` lines with `cal` between 0
 **Is the version I installed the version that is running?** Look at the `setup` line:
 
 ```json
-{"at":"setup","plugin":"1.6.9","pid":17136,"guarded":"flash1047/deepseek-v4.1-flash-free", ...}
+{"at":"setup","plugin":"1.6.10","pid":17136,"guarded":"flash1047/deepseek-v4.1-flash-free", ...}
 ```
 
 A `setup` line **without** `plugin` is a different build still held in memory. The runtime re-reads the
@@ -579,7 +579,7 @@ Limits worth knowing before you build on it:
 
 ## This release
 
-**v1.6.9 — stable.** One build; nothing about history is needed to use it.
+**v1.6.10 — stable.** One build; nothing about history is needed to use it.
 
 - **One goal.** An informational message ("у меня поиск запущен, просто чтобы ты знал") is context,
   not a task: it goes to `## Additions` in `goal.md` and is quoted after compaction as context that

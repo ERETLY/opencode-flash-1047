@@ -1,4 +1,13 @@
-# Changelog
+﻿# Changelog
+
+## v1.6.10 – 2026-10-27
+
+The plugin no longer tells the model to keep a `.omo/state.md`.
+
+### Fixed
+
+- **Every chat maintained a state file instead of doing its work.** The pressure notes at 70%, 85% and 93% told the model to write findings to `.omo/state.md`, the resume prompt asked it to read that file, and the compaction note pasted its contents back in. On a task with a written TZ it spent turns updating that file and closing "steps" instead of changing code. Those instructions and reads are gone; the notes now ask for paths, decisions and the next step to stay in the conversation, which is what the summary carries.
+- `goal.md` is unchanged and remains the task contract.
 
 ## v1.6.8 – 2026-10-26
 
