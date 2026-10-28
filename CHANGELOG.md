@@ -1,5 +1,24 @@
 ﻿# Changelog
 
+## v1.7.1 – 2026-10-28
+
+Goal files moved into `.omo/goals/`, and the ones already on disk are moved with them.
+
+### Changed
+
+- **One folder for goals.** `.omo/goals/<sessionID>.md` per chat, with `.omo/goals/latest.md` as a
+  mirror of the last active session. Every prompt that points at the goal uses the new path.
+- **Existing goals are adopted at startup.** `.omo/goal.<id>.md` is renamed into the folder; the old
+  single `.omo/goal.md` is copied to `<sessionID>.md`, with the session read from its own footer,
+  and to `latest.md`. Nothing is overwritten: if the destination exists, the old file is left alone.
+  A chat that is already running therefore finds its task at the new path on the next compaction.
+- The migration logs `goals-migrated` with the file count, so it is visible rather than implied.
+
+### Tests
+
+142 assertions (was 139): a legacy per-session file is moved into `.omo/goals` with its content
+intact, and the old `goal.md` is adopted for its session and as `latest.md`.
+
 ## v1.7.0 – 2026-10-27
 
 The goal file is per session, so two chats in one folder cannot overwrite each other.

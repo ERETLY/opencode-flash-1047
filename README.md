@@ -1,14 +1,14 @@
 ﻿# flash 1047 — Super Free
 
 [![release](https://img.shields.io/github/v/release/ERETLY/opencode-flash-1047?label=release)](https://github.com/ERETLY/opencode-flash-1047/releases)
-[![tests](https://img.shields.io/badge/tests-139%2F139-brightgreen)](#tests-and-evidence)
+[![tests](https://img.shields.io/badge/tests-142%2F142-brightgreen)](#tests-and-evidence)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![opencode](https://img.shields.io/badge/OpenCode-2.x-black)](https://opencode.ai)
 
 A free **310K-context** `deepseek-v4.1-flash-free` entry for **OpenCode 2.x**, plus the plugin that
 keeps multi-hour sessions from dying, drifting, or quietly getting dumber.
 
-**Version:** v1.7.0 · **Status:** stable — 139/139 unit tests, the compaction/pruning core
+**Version:** v1.7.1 · **Status:** stable — 142/142 unit tests, the compaction/pruning core
 live-verified on OpenCode 2.1.3 · **Cost:** $0 · **Scope:** one provider, one model id, nothing else
 is touched.
 
@@ -89,7 +89,7 @@ Same model id, same weights, same $0. The difference is two things: **the declar
 | dead-stream retry | the turn ends | **retried, up to 7** |
 | resume after a failed turn | no | **yes** |
 | post-compaction anchor | no | **yes** |
-| task saved on disk | no | **`.omo/goal.md`** |
+| task saved on disk | no | **`.omo/goals/<sessionID>.md`** |
 | model switching | — | **never** |
 
 The 170 000 figure is not a defect of the model: the runtime compacts at `limit − max(15%, 16 000)`,
@@ -102,7 +102,7 @@ measured 310 000 is what buys those ~93 000 back.
 |---|---|---|
 | a 200 000-character log lands in context | the next request is too big | the middle is elided with a marker, the turn survives |
 | context reaches the compaction point | compacts at ~170k, early | compacts at 263.5k, with ~46k of headroom |
-| the summary loses your wording | you re-explain | `goal.md` + the note carry your asks verbatim |
+| the summary loses your wording | you re-explain | the goal file + the note carry your asks verbatim |
 | after compaction | the session waits for you | one prompt continues the task, anchored on the goal |
 | the stream dies at 90% | the turn fails | retried; pruned harder on the second failure |
 | the summariser stream is truncated | compaction fails, the session stalls | backoff, then emergency trim: the session keeps working |
@@ -128,8 +128,8 @@ mechanical. Switch to a paid model when the problem is the thinking, not the typ
 |---|---|---|
 | `400 context_length_exceeded` around 200k | the declared window is wrong | declares 310 000, measures real usage, calibrates per model |
 | compaction fires every turn and fails | cooldown counted from the request, not the failure | backoff measured from the failure: 3 → 6 → 12 → 24 → 30 min |
-| the session goes idle after compaction and waits for you | nothing continues the turn | auto-continue prompt + `.omo/goal.md` on disk |
-| "the model forgot what I asked" | the summary paraphrased your requirements away | the compaction note carries your last four asks **verbatim**, and `goal.md` keeps a `## Requirements` section |
+| the session goes idle after compaction and waits for you | nothing continues the turn | auto-continue prompt + the goal file on disk |
+| "the model forgot what I asked" | the summary paraphrased your requirements away | the compaction note carries your last four asks **verbatim**, and the goal file keeps a `## Requirements` section |
 | after compaction it continues the wrong thing | an informational "у меня поиск запущен, просто чтобы ты знал" overwrote the goal | **one goal**: an addition goes to its own `## Additions` section and is quoted as context, never as the task |
 | one reworded demand eats the task list | every message was appended as a new requirement | an extension **replaces** the old requirement (the longer version wins) instead of taking another slot |
 | the model gets lazy in long chats | pressure notes said "keep replies short, avoid re-reading" | notes now say: full quality, verify, use targeted reads, record findings |
@@ -355,7 +355,7 @@ pruning starts where there is still room rather than at 170 000. The cost is lat
 | **stall** | 15 min without an event, verified against server state, then interrupt → verify → resume |
 | **checkpoints** | `.omo/checkpoints/<session>.json` every 20 tool calls, on start/finish, around compaction |
 | **re-anchor** | one system part after compaction: quotes the task, forbids restarting or inventing work |
-| **goal file** | `.omo/goal.md` on every substantive message: the task, the last four asks verbatim, the additions, the last nudge |
+| **goal file** | `.omo/goals/<sessionID>.md` on every substantive message: the task, the last four asks verbatim, the additions, the last nudge |
 | **one goal** | a message flagged as informational ("у меня поиск запущен, чтобы ты знал") goes to `## Additions` and never replaces the task; an extension of an existing ask replaces it instead of taking another slot; a reverted-and-rewritten message replaces the entry its first version produced, while a second message without a revert is appended |
 | **compaction note** | appended as a **new user message** with the user's own words, paths with line ranges, commands, errors, last step, `.omo/state.md` |
 | **compaction failure** | silence, not a retry: the cooldown is measured from the failure and doubles 3 → 6 → 12 → 24 → 30 min |
@@ -402,7 +402,7 @@ A healthy long session looks like: steady `calibrate` lines with `cal` between 0
 **Is the version I installed the version that is running?** Look at the `setup` line:
 
 ```json
-{"at":"setup","plugin":"1.7.0","pid":17136,"guarded":"flash1047/deepseek-v4.1-flash-free", ...}
+{"at":"setup","plugin":"1.7.1","pid":17136,"guarded":"flash1047/deepseek-v4.1-flash-free", ...}
 ```
 
 A `setup` line **without** `plugin` is a different build still held in memory. The runtime re-reads the
@@ -419,7 +419,7 @@ node --experimental-strip-types test/resilience.test.mjs   # Node >= 22.6, no de
 ```
 
 `test/resilience.test.mjs` drives the plugin through a fake session and a fake event stream, so
-behaviour is asserted rather than eyeballed. **Last run: 139 / 139 passed.**
+behaviour is asserted rather than eyeballed. **Last run: 142 / 142 passed.**
 
 | area | asserted |
 |---|---|
@@ -541,7 +541,7 @@ retries. The failure modes it cannot remove are the free pool's latency and load
 ```
 plugin/resilience/index.ts    the OpenCode v2 plugin
 instructions/long-session.md  long-session rules, loaded via the `instructions` array
-test/resilience.test.mjs      regression suite (139 assertions, no dependencies)
+test/resilience.test.mjs      regression suite (142 assertions, no dependencies)
 opencode.snippet.jsonc        reference config fragment (provider + plugin + compaction + instructions)
 scripts/apply-config.js       idempotent config merge + plugin and rules copy (node)
 install.ps1 / install.sh      convenience installers
@@ -579,14 +579,17 @@ Limits worth knowing before you build on it:
 
 ## This release
 
-**v1.7.0 — stable.** One build; nothing about history is needed to use it.
+**v1.7.1 — stable.** One build; nothing about history is needed to use it.
 
-- **Two chats in one folder no longer share a task.** The goal is written per session
-  (`.omo/goal.<sessionID>.md`); the anchor, the addendum hints, the resume prompt and the
-  post-compaction prompt all point at that session's own file. `.omo/goal.md` stays behind as a
-  mirror of whichever chat wrote last, so existing tooling and the old path still work. Before this,
-  a second chat overwrote the file and the first one was told to read someone else's task after a
-  compaction.
+- **All goal files live in one folder.** Everything is under `.omo/goals/`: one file per session
+  (`<sessionID>.md`) plus `latest.md`, a mirror of whichever chat wrote last. The anchor, the
+  additions hints, the resume prompt and the post-compaction prompt all point at the session's own
+  file. Existing goals are moved there automatically at startup - `goal.<id>.md` from 1.7.0 and the
+  old single `goal.md`, whose session is read from its own footer - so a running chat finds its task
+  at the new path instead of losing it. Nothing is deleted: if a destination already exists, the old
+  file is left untouched.
+- **Two chats in one folder no longer share a task.** Before this, the second chat overwrote the
+  single goal file and the first one was told to read someone else's task after a compaction.
 - **One goal.** An informational message ("у меня поиск запущен, просто чтобы ты знал") is context,
   not a task: it goes to `## Additions` in `goal.md` and is quoted after compaction as context that
   must not be swapped for the goal.
@@ -623,10 +626,10 @@ Limits worth knowing before you build on it:
   `.omo/state.md`.
 - The compaction note carries your last four asks verbatim, file paths with line ranges, the exact
   commands and error lines, and forbids paraphrasing your requirements.
-- `.omo/goal.md` keeps the task, those asks, the additions and your last nudge on disk.
+- `.omo/goals/<sessionID>.md` keeps the task, those asks, the additions and your last nudge on disk.
 - After compaction the session continues by itself instead of waiting for "continue".
 - Context pressure asks for full quality and targeted reads, not short answers.
-- 139 assertions; the compaction/pruning core live-verified on OpenCode 2.1.3, the goal/additions
+- 142 assertions; the compaction/pruning core live-verified on OpenCode 2.1.3, the goal/additions
   classification verified against a real chat that exhibited the failure, a five-scenario survival
   probe (anchor, note, disk, twelve-slot cap, pre-task promotion) and a replay of the exact two
   messages from that chat.

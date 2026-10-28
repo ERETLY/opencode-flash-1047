@@ -16,7 +16,7 @@ const check = (name, cond, detail = '') => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 /** Fresh plugin instance with a controllable session + event stream. */
-async function rig(options = {}, model = { providerID: 'flash1047', id: 'deepseek-v4.1-flash-free' }, over = {}) {
+async function rig(options = {}, model = { providerID: 'flash1047', id: 'deepseek-v4.1-flash-free' }, over = {}, beforeSetup = null) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'res-'))
   const hooks = {}
   const calls = { prompt: [], compact: 0, switchModel: 0, context: 0 }
@@ -72,6 +72,7 @@ async function rig(options = {}, model = { providerID: 'flash1047', id: 'deepsee
       },
     },
   }
+  if (beforeSetup) beforeSetup(root)
   await plugin.setup(ctx)
   await sleep(5)
   const emit = async (type, data = {}, wait = 30) => {
@@ -428,9 +429,9 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
 {
   const r = await rig()
   await r.prompt('write the long report about solana wallets and verify each claim')
-  const p = path.join(r.root, '.omo', 'goal.md')
+  const p = path.join(r.root, '.omo', 'goals', 'latest.md')
   const g = fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : ''
-  check('goal file: the task is written to .omo/goal.md', g.includes('write the long report about solana'))
+  check('goal file: the task is written to .omo/goals/latest.md', g.includes('write the long report about solana'))
   await r.prompt('продолжай')
   const g2 = fs.readFileSync(p, 'utf8')
   check('goal file: a nudge does not replace the goal', g2.includes('write the long report about solana') && /продолжай/.test(g2))
@@ -443,16 +444,40 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   )
   // Two chats in one folder must not overwrite each other: the session copy is authoritative and
   // goal.md is only a mirror of the last writer.
-  const own = path.join(r.root, '.omo', 'goal.ses_test.md')
+  const own = path.join(r.root, '.omo', 'goals', 'ses_test.md')
   check('goal file: a per-session copy exists', fs.existsSync(own), own)
   check('goal file: the session copy matches the mirror', fs.existsSync(own) && fs.readFileSync(own, 'utf8') === g3)
+}
+
+// ---------------------------------------------------------------- legacy goal files are adopted
+{
+  const r = await rig({}, undefined, {}, (root) => {
+    const omo = path.join(root, '.omo')
+    fs.mkdirSync(omo, { recursive: true })
+    fs.writeFileSync(path.join(omo, 'goal.ses_old1.md'), '# Goal\n\nold task one\n')
+    fs.writeFileSync(
+      path.join(omo, 'goal.md'),
+      '# Goal\n\nlegacy mirror task\n\n---\n_Updated 2026-10-27T00:00:00.000Z by omni-resilience (session ses_old2)._',
+    )
+  })
+  const dir = path.join(r.root, '.omo', 'goals')
+  check(
+    'goals: a legacy per-session file is moved into .omo/goals',
+    fs.existsSync(path.join(dir, 'ses_old1.md')) && !fs.existsSync(path.join(r.root, '.omo', 'goal.ses_old1.md')),
+  )
+  check(
+    'goals: the legacy goal.md is adopted for its session and as latest.md',
+    fs.existsSync(path.join(dir, 'ses_old2.md')) && fs.existsSync(path.join(dir, 'latest.md')),
+  )
+  const moved = fs.readFileSync(path.join(dir, 'ses_old1.md'), 'utf8')
+  check('goals: the moved file keeps its content', moved.includes('old task one'))
 }
 
 // ------------------------------------------------------- one goal, additions marked as additions
 {
   const r = await rig()
   await r.prompt('audit the checker so that we never lose a token across the chains')
-  const p = path.join(r.root, '.omo', 'goal.md')
+  const p = path.join(r.root, '.omo', 'goals', 'latest.md')
   await r.prompt(
     'и да, у меня поиск запущен просто чтобы ты знал, что ошибки по прокси могут быть, проверь что всё гуд',
   )
@@ -480,7 +505,7 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   const r = await rig()
   await r.prompt('build the report generator for the token checker')
   await r.prompt('у меня запущен старый чекер и он падает на BNB - почини эту ошибку в chck3.py')
-  const g = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  const g = fs.readFileSync(path.join(r.root, '.omo', 'goals', 'latest.md'), 'utf8')
   check(
     'additions: a state report that also asks for work stays the goal',
     /# Goal\n\nу меня запущен старый чекер/.test(g) && !/## Additions[\s\S]*почини эту ошибку/.test(g),
@@ -516,12 +541,12 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   await r.prompt(
     'check the other addresses and the test seeds to be sure tokens are not lost, and also the exchange wallets, print the full diff',
   )
-  const g = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  const g = fs.readFileSync(path.join(r.root, '.omo', 'goals', 'latest.md'), 'utf8')
   const asks = (g.split('## Requirements')[1] || '').split('## Additions')[0]
   check('dedupe: an extension does not consume another requirement slot', (asks.match(/^\d+\. /gm) || []).length === 1, asks.trim().slice(0, 200))
   check('dedupe: the longest version of the requirement wins', asks.includes('print the full diff'))
   await r.prompt('now also compare the two runs against ankr and report the lost contracts')
-  const g2 = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  const g2 = fs.readFileSync(path.join(r.root, '.omo', 'goals', 'latest.md'), 'utf8')
   const asks2 = (g2.split('## Requirements')[1] || '').split('## Additions')[0]
   check('dedupe: a genuinely new requirement is appended', (asks2.match(/^\d+\. /gm) || []).length === 2, asks2.trim().slice(0, 300))
   check('dedupe: the rewritten goal is the current one', /# Goal\n\nnow also compare the two runs/.test(g2))
@@ -534,7 +559,7 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   await r.prompt(
     'now write a full report for the client about how we fixed the parser bug in src/a.ts, with a timeline of every step and the cost of each one',
   )
-  const g = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  const g = fs.readFileSync(path.join(r.root, '.omo', 'goals', 'latest.md'), 'utf8')
   const asks = (g.split('## Requirements')[1] || '').split('## Additions')[0]
   check('dedupe: a different ask that merely mentions the old one is not merged into it', (asks.match(/^\d+\. /gm) || []).length === 2, asks.trim().slice(0, 300))
 }
@@ -543,7 +568,7 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   // an addition with no goal yet is still worth keeping: it is the only intent on record
   const r = await rig()
   await r.prompt('у меня поиск запущен просто чтобы ты знал, проверь пожалуйста что всё гуд по прокси')
-  const g = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  const g = fs.readFileSync(path.join(r.root, '.omo', 'goals', 'latest.md'), 'utf8')
   check('additions: with no task on record it still becomes the goal', /# Goal\n\nу меня поиск запущен/.test(g), g.split('\n').slice(0, 3).join(' / '))
 }
 
@@ -554,7 +579,7 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   for (let i = 1; i <= 6; i++) {
     await r.prompt(`добавка номер ${i}: для информации, просто чтобы ты знал про деталь ${i}`)
   }
-  const g = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  const g = fs.readFileSync(path.join(r.root, '.omo', 'goals', 'latest.md'), 'utf8')
   const sec = (g.split('## Additions')[1] || '').split('## Last instruction')[0]
   const kept = [...sec.matchAll(/добавка номер (\d+)/g)].map((m) => Number(m[1]))
   check(
@@ -570,7 +595,7 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   const r = await rig()
   await r.prompt('у меня поиск запущен просто чтобы ты знал, что ошибки по прокси могут быть')
   await r.prompt('audit the checker so that we never lose a token across the chains')
-  const g = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  const g = fs.readFileSync(path.join(r.root, '.omo', 'goals', 'latest.md'), 'utf8')
   const reqs = (g.split('## Requirements')[1] || '').split('## Additions')[0]
   check(
     'additions: a pre-task addition is promoted out of the goal',
@@ -589,7 +614,7 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   const ADD = 'и да, у мя ща самого поиск запущен. просто чтобы ты знал, что мб ошибки будут хз по прокси'
   await r.prompt('audit the checker so that we never lose a token across the chains')
   await r.prompt(ADD)
-  const g = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  const g = fs.readFileSync(path.join(r.root, '.omo', 'goals', 'latest.md'), 'utf8')
   const last = (g.split('## Last instruction')[1] || '').split('---')[0]
   check('additions: the newest addition is not repeated as a last instruction', !last.includes('поиск запущен'), last.trim().slice(0, 200))
   check('additions: the file says plainly that it is context, not an instruction', /not an instruction/.test(last), last.trim().slice(0, 200))
@@ -607,7 +632,7 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   const r = await rig()
   await r.prompt('сделай фулл аудит чекера и чистую стабильную версию')
   await r.prompt('я запускаю "C:\\Users\\eretly\\Desktop\\Scripts\\Opencode\\CheckerCrypto\\chck4.cmd"')
-  const g = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  const g = fs.readFileSync(path.join(r.root, '.omo', 'goals', 'latest.md'), 'utf8')
   check(
     'additions: a launch statement does not replace the goal',
     /# Goal\n\nсделай фулл аудит чекера/.test(g) && /## Additions[\s\S]*я запускаю/.test(g),
@@ -619,7 +644,7 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   const r = await rig()
   await r.prompt('сделай фулл аудит чекера и чистую стабильную версию')
   await r.prompt('я запускаю chck4.cmd, он падает на Litecoin - почини')
-  const g = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  const g = fs.readFileSync(path.join(r.root, '.omo', 'goals', 'latest.md'), 'utf8')
   check(
     'additions: a launch statement that asks for work stays the goal',
     /# Goal\n\nя запускаю chck4\.cmd, он падает/.test(g) && !/## Additions[\s\S]*почини/.test(g),
@@ -637,7 +662,7 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   await r.prompt('audit the checker so that we never lose a token across the chains')
   await r.prompt('к сведению: мой прогон идёт параллельно, так что прокси могут тупить')
   await r.prompt('к сведению: мой прогон идёт параллельно, поэтому часть прокси будет тупить и отваливаться')
-  const g = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  const g = fs.readFileSync(path.join(r.root, '.omo', 'goals', 'latest.md'), 'utf8')
   const adds = (g.split('## Additions')[1] || '').split('## Last instruction')[0]
   check('revision: an edited addition replaces the old one', (adds.match(/^\d+\. /gm) || []).length === 1, adds.trim().slice(0, 300))
   check('revision: the newest wording wins', adds.includes('часть прокси будет тупить'), adds.trim().slice(0, 300))
@@ -661,7 +686,7 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   await r.prompt('audit the checker so that we never lose a token across the chains')
   await r.prompt(A1)
   await r.prompt('к сведению: мой прогон идёт параллельно, поэтому часть прокси будет тупить и отваливаться')
-  const g = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  const g = fs.readFileSync(path.join(r.root, '.omo', 'goals', 'latest.md'), 'utf8')
   const adds = (g.split('## Additions')[1] || '').split('## Last instruction')[0]
   check('revision: a message still in history is not treated as an edit', (adds.match(/^\d+\. /gm) || []).length === 2, adds.trim().slice(0, 300))
 }
@@ -674,7 +699,7 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   const r = await rig({}, undefined, reverted)
   await r.prompt('проверь на других адресах что мы НЕ ТЕРЯЕМ токены')
   await r.prompt('проверь на других адресах, биржевые кошельки и тестовые сидки, что мы НЕ ТЕРЯЕМ токены')
-  const g = fs.readFileSync(path.join(r.root, '.omo', 'goal.md'), 'utf8')
+  const g = fs.readFileSync(path.join(r.root, '.omo', 'goals', 'latest.md'), 'utf8')
   const reqs = (g.split('## Requirements')[1] || '').split('## Additions')[0]
   check('revision: an edited task replaces the old one', (reqs.match(/^\d+\. /gm) || []).length === 1, reqs.trim().slice(0, 300))
   check('revision: the goal is the newest wording', /# Goal\n\nпроверь на других адресах, биржевые кошельки/.test(g))
@@ -685,7 +710,7 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   await r.prompt('build the geophoto report')
   await r.emit('session.compaction.ended', {}, 1700)
   check('auto-continue: one prompt after compaction', r.calls.prompt.length === 1, `prompts=${r.calls.prompt.length}`)
-  check('auto-continue: the prompt points at the session goal file', String(r.calls.prompt[0] || '').includes('.omo/goal.ses_test.md'))
+  check('auto-continue: the prompt points at the session goal file', String(r.calls.prompt[0] || '').includes('.omo/goals/ses_test.md'))
   await r.emit('session.compaction.ended', {}, 1700)
   check('auto-continue: respects the 60 s cooldown', r.calls.prompt.length === 1)
 }

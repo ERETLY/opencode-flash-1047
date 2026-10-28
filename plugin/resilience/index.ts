@@ -10,7 +10,7 @@ const WIDE_PER_TOKEN = 2.0
 const PLUGIN_ID = 'omni-resilience'
 // Stamped into every `setup` log line, so "is the version I installed actually the version that
 // is running?" is answerable from the log instead of from the file hash.
-const VERSION = '1.7.0'
+const VERSION = '1.7.1'
 
 // Errors that neither a retry nor a resume prompt can fix: a wrong credential, a missing route or a
 // model id the gateway does not know. The old pattern `model.unavailable` matched exactly one
@@ -116,8 +116,9 @@ const headTail = (s: string, head: number, tail: number) => {
 }
 
 // The goal file is per session: two chats in one folder must not read each other's task after a
-// compaction. `goal.md` is only a mirror of whichever session wrote last.
-const goalRef = (sessionID: string): string => `.omo/goal.${sessionID}.md`
+// compaction. Everything lives under `.omo/goals/`, one file per session plus `latest.md` - a mirror
+// of whichever session wrote last, kept for anything that still wants a single path.
+const goalRef = (sessionID: string): string => `.omo/goals/${sessionID}.md`
 
 // The provider reports the exact prompt size on every assistant message. When the outgoing request
 // already contains such a message, that number plus the tail after it is a measurement, not an
@@ -668,6 +669,54 @@ export default {
     shared.hooksRegistered = true
     shared.hooksAt = Date.now()
 
+    // Goal files used to live beside the logs (`goal.md` for everything, then `goal.<id>.md`). They
+    // are now under `.omo/goals/`. Move what is already there instead of asking the user to re-send
+    // the task: a running session must find its goal at the new path on the next compaction.
+    const migrateGoals = () => {
+      try {
+        const omo = path.join(root, '.omo')
+        const dir = path.join(omo, 'goals')
+        fs.mkdirSync(dir, { recursive: true })
+        const adopt = (from: string, sid: string) => {
+          const to = path.join(dir, `${sid}.md`)
+          if (fs.existsSync(to)) return false
+          try {
+            fs.copyFileSync(from, to)
+            return true
+          } catch {
+            return false
+          }
+        }
+        const names = fs.readdirSync(omo)
+        for (const name of names) {
+          const m = /^goal\.(ses_[A-Za-z0-9]+)\.md$/.exec(name)
+          if (!m) continue
+          const from = path.join(omo, name)
+          const to = path.join(dir, `${m[1]}.md`)
+          if (fs.existsSync(to)) continue
+          try {
+            fs.renameSync(from, to)
+          } catch {}
+        }
+        const legacy = path.join(omo, 'goal.md')
+        if (fs.existsSync(legacy)) {
+          const text = fs.readFileSync(legacy, 'utf8')
+          const sid = /\(session (ses_[A-Za-z0-9]+)\)/.exec(text)?.[1]
+          if (sid) adopt(legacy, sid)
+          const latest = path.join(dir, 'latest.md')
+          if (!fs.existsSync(latest)) {
+            try {
+              fs.copyFileSync(legacy, latest)
+            } catch {}
+          }
+        }
+        log({ at: 'goals-migrated', dir: '.omo/goals', files: fs.readdirSync(dir).length })
+      } catch (e: any) {
+        log({ at: 'goals-migrate-error', error: String(e?.message || e) })
+      }
+    }
+    migrateGoals()
+
     await ctx.session.hook('prompt', async (event: any) => {
       const s = get(event.sessionID)
       if (!(await manage(event.sessionID, s))) return
@@ -762,11 +811,13 @@ export default {
               `This file is the task contract after compaction - edit it freely._\n`
           // One goal file per session. Two chats open in the same folder used to overwrite the same
           // goal.md, so after a compaction one chat was told to read the other chat's task. The
-          // session copy is authoritative; goal.md stays as a mirror of the last active chat.
-          const sessGoal = path.join(root, '.omo', `goal.${event.sessionID}.md`)
+          // session copy is authoritative; latest.md stays as a mirror of the last active chat.
+          const goalsDir = path.join(root, '.omo', 'goals')
+          fs.mkdirSync(goalsDir, { recursive: true })
+          const sessGoal = path.join(goalsDir, `${event.sessionID}.md`)
           fs.writeFileSync(sessGoal, goalBody)
           try {
-            fs.copyFileSync(sessGoal, path.join(root, '.omo', 'goal.md'))
+            fs.copyFileSync(sessGoal, path.join(goalsDir, 'latest.md'))
           } catch {}
         } catch {}
         s.resumes = 0
