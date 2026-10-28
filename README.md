@@ -8,7 +8,7 @@
 A free **310K-context** `deepseek-v4.1-flash-free` entry for **OpenCode 2.x**, plus the plugin that
 keeps multi-hour sessions from dying, drifting, or quietly getting dumber.
 
-**Version:** v1.7.1 · **Status:** stable — 142/142 unit tests, the compaction/pruning core
+**Version:** v1.7.2 · **Status:** stable — 142/142 unit tests, the compaction/pruning core
 live-verified on OpenCode 2.1.3 · **Cost:** $0 · **Scope:** one provider, one model id, nothing else
 is touched.
 
@@ -402,7 +402,7 @@ A healthy long session looks like: steady `calibrate` lines with `cal` between 0
 **Is the version I installed the version that is running?** Look at the `setup` line:
 
 ```json
-{"at":"setup","plugin":"1.7.1","pid":17136,"guarded":"flash1047/deepseek-v4.1-flash-free", ...}
+{"at":"setup","plugin":"1.7.2","pid":17136,"guarded":"flash1047/deepseek-v4.1-flash-free", ...}
 ```
 
 A `setup` line **without** `plugin` is a different build still held in memory. The runtime re-reads the
@@ -579,17 +579,15 @@ Limits worth knowing before you build on it:
 
 ## This release
 
-**v1.7.1 — stable.** One build; nothing about history is needed to use it.
+**v1.7.2 — stable.** One build; nothing about history is needed to use it.
 
-- **All goal files live in one folder.** Everything is under `.omo/goals/`: one file per session
-  (`<sessionID>.md`) plus `latest.md`, a mirror of whichever chat wrote last. The anchor, the
-  additions hints, the resume prompt and the post-compaction prompt all point at the session's own
-  file. Existing goals are moved there automatically at startup - `goal.<id>.md` from 1.7.0 and the
-  old single `goal.md`, whose session is read from its own footer - so a running chat finds its task
-  at the new path instead of losing it. Nothing is deleted: if a destination already exists, the old
-  file is left untouched.
-- **Two chats in one folder no longer share a task.** Before this, the second chat overwrote the
-  single goal file and the first one was told to read someone else's task after a compaction.
+- **One goal file per chat, nothing shared.** Everything is under `.omo/goals/`, named
+  `<sessionID>.md`. There is no `latest.md` and no `goal.md`: a shared copy is exactly the thing that
+  let two chats read each other's task, so it is gone. The anchor, the additions hints, the resume
+  prompt and the post-compaction prompt all point at the session's own file. Existing goals are moved
+  there automatically at startup - `goal.<id>.md` from 1.7.0 and the old single `goal.md`, whose
+  session is read from its own footer - so a running chat finds its task at the new path instead of
+  losing it. Nothing is overwritten: if a destination already exists, the old file is left untouched.
 - **One goal.** An informational message ("у меня поиск запущен, просто чтобы ты знал") is context,
   not a task: it goes to `## Additions` in `goal.md` and is quoted after compaction as context that
   must not be swapped for the goal.

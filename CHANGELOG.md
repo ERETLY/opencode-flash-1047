@@ -1,5 +1,22 @@
 ﻿# Changelog
 
+## v1.7.2 – 2026-10-28
+
+No shared goal file at all: one per chat, nothing else.
+
+### Changed
+
+- **`latest.md` removed.** 1.7.1 wrote it as a mirror of the last active chat, but nothing read it -
+  it was a second copy of one chat's goal, and a shared copy is the exact failure this series
+  removes. The plugin now writes only `.omo/goals/<sessionID>.md`.
+- The legacy `goal.md` migration still adopts the old file for its session; it no longer also
+  creates a mirror copy.
+
+### Tests
+
+142 assertions: the suite now asserts that no `latest.md` is written, alongside the per-session
+file and the migration checks.
+
 ## v1.7.1 – 2026-10-28
 
 Goal files moved into `.omo/goals/`, and the ones already on disk are moved with them.

@@ -10,7 +10,7 @@ const WIDE_PER_TOKEN = 2.0
 const PLUGIN_ID = 'omni-resilience'
 // Stamped into every `setup` log line, so "is the version I installed actually the version that
 // is running?" is answerable from the log instead of from the file hash.
-const VERSION = '1.7.1'
+const VERSION = '1.7.2'
 
 // Errors that neither a retry nor a resume prompt can fix: a wrong credential, a missing route or a
 // model id the gateway does not know. The old pattern `model.unavailable` matched exactly one
@@ -116,8 +116,7 @@ const headTail = (s: string, head: number, tail: number) => {
 }
 
 // The goal file is per session: two chats in one folder must not read each other's task after a
-// compaction. Everything lives under `.omo/goals/`, one file per session plus `latest.md` - a mirror
-// of whichever session wrote last, kept for anything that still wants a single path.
+// compaction. Everything lives under `.omo/goals/`, one file per session - no shared file at all.
 const goalRef = (sessionID: string): string => `.omo/goals/${sessionID}.md`
 
 // The provider reports the exact prompt size on every assistant message. When the outgoing request
@@ -703,12 +702,6 @@ export default {
           const text = fs.readFileSync(legacy, 'utf8')
           const sid = /\(session (ses_[A-Za-z0-9]+)\)/.exec(text)?.[1]
           if (sid) adopt(legacy, sid)
-          const latest = path.join(dir, 'latest.md')
-          if (!fs.existsSync(latest)) {
-            try {
-              fs.copyFileSync(legacy, latest)
-            } catch {}
-          }
         }
         log({ at: 'goals-migrated', dir: '.omo/goals', files: fs.readdirSync(dir).length })
       } catch (e: any) {
@@ -810,15 +803,10 @@ export default {
               `_Updated ${new Date().toISOString()} by omni-resilience (session ${event.sessionID}). ` +
               `This file is the task contract after compaction - edit it freely._\n`
           // One goal file per session. Two chats open in the same folder used to overwrite the same
-          // goal.md, so after a compaction one chat was told to read the other chat's task. The
-          // session copy is authoritative; latest.md stays as a mirror of the last active chat.
+          // goal.md, so after a compaction one chat was told to read the other chat's task.
           const goalsDir = path.join(root, '.omo', 'goals')
           fs.mkdirSync(goalsDir, { recursive: true })
-          const sessGoal = path.join(goalsDir, `${event.sessionID}.md`)
-          fs.writeFileSync(sessGoal, goalBody)
-          try {
-            fs.copyFileSync(sessGoal, path.join(goalsDir, 'latest.md'))
-          } catch {}
+          fs.writeFileSync(path.join(goalsDir, `${event.sessionID}.md`), goalBody)
         } catch {}
         s.resumes = 0
         s.lastResumeAt = 0
