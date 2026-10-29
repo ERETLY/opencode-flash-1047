@@ -10,7 +10,7 @@ const WIDE_PER_TOKEN = 2.0
 const PLUGIN_ID = 'omni-resilience'
 // Stamped into every `setup` log line, so "is the version I installed actually the version that
 // is running?" is answerable from the log instead of from the file hash.
-const VERSION = '1.7.2'
+const VERSION = '1.8.0'
 
 // Errors that neither a retry nor a resume prompt can fix: a wrong credential, a missing route or a
 // model id the gateway does not know. The old pattern `model.unavailable` matched exactly one
@@ -504,6 +504,10 @@ export default {
         // cached prompt tokens are reported separately from the non-cached `input`
         const real = Number(tk.input || 0) + Number(tk.cache?.read || 0) + Number(tk.cache?.write || 0)
         if (!Number.isFinite(real) || real < 1000) return
+        // The provider's own prompt size. Thresholds prefer it over the estimator: on a tool-heavy
+        // transcript the estimator ran ~24% high (est 257k vs 207k reported), and multiplied by a
+        // stale `cal` it claimed 98% of the window while the real prompt was 68%.
+        s.real = { tokens: real, msgs: msgs.length, at: Date.now() }
         const ratio = real / prev
         if (!(ratio > 0.3 && ratio < 3)) return
 
@@ -533,6 +537,32 @@ export default {
           reasoning: Number(tk.reasoning || 0),
           output: Number(tk.output || 0),
         })
+      } catch {}
+    }
+
+    // A fresh sample for the request that is about to be sent. Calibration only runs on tool
+    // events, so a session that answers without tools (the exact case where the model was told the
+    // context was full) never learned a ratio and kept `cal` at its default. Reading the transcript
+    // at prompt time costs one local query and makes the provider's number available every turn.
+    const sampleRealUsage = async (sessionID: string) => {
+      const s = get(sessionID)
+      if (!ours(s)) return
+      try {
+        const res: any = await Promise.race([
+          ctx.session.context({ sessionID }),
+          new Promise((r) => setTimeout(() => r(null), 1500)),
+        ])
+        const msgs = res?.messages ?? res?.data ?? res
+        if (!Array.isArray(msgs)) return
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          const m: any = msgs[i]
+          const t = m?.tokens ?? m?.info?.tokens ?? m?.metadata?.tokens ?? m?.data?.tokens
+          if (t && typeof t.input === 'number') {
+            const real = Number(t.input || 0) + Number(t.cache?.read || 0) + Number(t.cache?.write || 0)
+            if (Number.isFinite(real) && real > 1000) s.real = { tokens: real, msgs: msgs.length, at: Date.now() }
+            return
+          }
+        }
       } catch {}
     }
 
@@ -713,6 +743,9 @@ export default {
     await ctx.session.hook('prompt', async (event: any) => {
       const s = get(event.sessionID)
       if (!(await manage(event.sessionID, s))) return
+      // The provider's own prompt size, read once per user prompt. The context hook below uses it
+      // as the base instead of the estimator, which is what made 207k look like 303k.
+      await sampleRealUsage(event.sessionID)
       const text = event.prompt?.text || ''
       // our own messages are not user intent: a resume nudge and the auto-continue prompt must not
       // overwrite the goal or reset the turn budget
@@ -895,9 +928,21 @@ export default {
       // size on the last assistant message, so only the tail after it has to be estimated. This
       // holds even when calibration cannot read the transcript or the text is hard to estimate.
       const sample = lastPromptUsage(event.messages)
-      let used = sample
-        ? Math.round(sample.real + estimate(event.messages.slice(sample.index + 1)))
-        : Math.round(est * cal)
+      const real = s.real && Date.now() - Number(s.real.at || 0) < 2 * 3600_000 ? s.real : null
+      let src = 'est'
+      let used: number
+      if (sample) {
+        used = Math.round(sample.real + estimate(event.messages.slice(sample.index + 1)))
+        src = 'real'
+      } else if (real) {
+        // Everything the provider already counted, plus only what arrived after that sample.
+        const added = event.messages.length - Number(real.msgs || 0)
+        const tail = added > 0 && added <= 80 ? estimate(event.messages.slice(-added)) : 0
+        used = Math.round(real.tokens + tail)
+        src = 'real'
+      } else {
+        used = Math.round(est * cal)
+      }
       let ratio = used / CFG.limit
 
       if (event.options) {
@@ -914,7 +959,7 @@ export default {
           toolMsgs += 1
           for (const p of m.content) if (p?.type === 'tool-result' && typeof p?.result?.value === 'string') toolChars += p.result.value.length
         }
-        log({ at: 'ctx', sessionID: event.sessionID, used, est, cal, src: sample ? 'real' : 'est', ratio: Number(ratio.toFixed(3)), msgs: event.messages?.length, toolMsgs, toolChars })
+        log({ at: 'ctx', sessionID: event.sessionID, used, est, cal, src, ratio: Number(ratio.toFixed(3)), msgs: event.messages?.length, toolMsgs, toolChars })
       }
 
       // ---- adaptive pruning of stale tool output (outgoing request only) ----
@@ -1044,10 +1089,19 @@ export default {
       // vanished). Now the note is present on EVERY request while the level holds, and by default it
       // is appended after the history, so the cached prefix stays byte-identical.
       const warn = (key: string, text: string) => {
+        const level = key === 'hard' ? 3 : key === 'compact' ? 2 : 1
         if (!s.marks[key]) {
           s.marks[key] = true
           log({ at: 'warn', sessionID: event.sessionID, key, used, ratio: Number(ratio.toFixed(3)), mode: CFG.warnMode })
         }
+        // A note is a nudge, not a standing order. Re-injecting it on every request kept the model
+        // in "context is full" mode for turns after the level was first reached, and it stopped
+        // working while the real prompt was 68% full. Only a higher level or a real rise re-sends.
+        const risen = ratio > Number(s.noteRatio || 0) + 0.02
+        const escalated = level > Number(s.noteLevel || 0) || risen
+        s.noteLevel = level
+        s.noteRatio = ratio
+        if (!escalated) return
         if (CFG.warnMode === 'system') {
           // the same text may already be in the system prompt from an earlier request
           const present = (event.system || []).some((part: any) => part?.type === 'text' && part?.text === text)
@@ -1058,10 +1112,15 @@ export default {
       }
 
       const pct = (ratio * 100).toFixed(0)
+      if (ratio < CFG.warn) {
+        // room again: the next rise starts a fresh note instead of being suppressed by an old level
+        s.noteLevel = 0
+        s.noteRatio = 0
+      }
       if (ratio >= CFG.hard) {
         warn(
           'hard',
-          `[omni-resilience] Automatic note, not from the user. Context ${pct}% full. Close only the current step and close the step cleanly; the summary that follows must carry paths, decisions and the next step. Compaction follows immediately. Do not start new work in this turn and do not drop the task.`,
+          `[omni-resilience] Automatic note, not from the user. Context ${pct}% full. Keep the current step focused and finish it cleanly: the task, the exact paths, the decisions and the next step must survive if a summary replaces the history. Do not drop the task and do not restart finished work.`,
         )
       } else if (ratio >= CFG.compact) {
         warn(

@@ -207,7 +207,7 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   tk = { input: 200, output: 20, reasoning: 0, cache: { read: 5800, write: 0 } } // ratio 0.6: sharp shift
   await r.context(msgs)
   const ctxLine = r.log().filter((l) => l.at === 'ctx').at(-1)
-  check('calibrate: ratio decisions use the calibrated estimate', ctxLine?.cal === 1.1199 && ctxLine?.used === Math.round(ctxLine?.est * ctxLine?.cal), JSON.stringify(ctxLine))
+  check('calibrate: a real sample wins over the calibrated estimate', ctxLine?.src === 'real' && ctxLine?.used === 10002 && ctxLine?.cal === 1.1199, JSON.stringify(ctxLine))
   await r.emit('session.tool.success', { id: '3', name: 'shell' })
   lines = r.log().filter((l) => l.at === 'calibrate')
   check('calibrate: a sharp content shift moves the ratio faster', lines.at(-1)?.jump === true && Math.abs((lines.at(-1)?.cal ?? 0) - 0.7819) < 0.001, JSON.stringify(lines.at(-1)))
@@ -926,10 +926,21 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   await r.context(b, sysB)
   check('warn: note is appended as a fresh user message after the history', a.length === 2 && a[1].role === 'user' && /\[omni-resilience\]/.test(a[1].content?.[0]?.text || ''))
   check('warn: the system prompt is left alone (prefix cache survives)', sysA.length === 0 && sysB.length === 0)
-  check('warn: the note is on every request while the level holds, not just the first', b.length === 2 && /\[omni-resilience\]/.test(b[1].content?.[0]?.text || ''))
+  check('warn: the note is not repeated on the next request at the same level', b.length === 1, `len=${b.length}`)
   check('warn: existing messages stay byte-identical', JSON.stringify(a[0]) === JSON.stringify(mk()[0]))
   check('warn: the note says it is automatic and not from the user', /not from the user/i.test(a[1].content?.[0]?.text || ''))
   check('warn: the level is logged once, not per request', r.log().filter((l) => l.at === 'warn').length === 1)
+
+  // The hard note used to order the model to stop working and promise a compaction that the plugin
+  // does not own any more. Live that produced "контекст переполнен - в этот ход работу не начинаю"
+  // while the real prompt was 68% full, and the session sat idle for turns.
+  const rh = await rig({ contextLimit: 100000 })
+  const hardMsgs = [{ role: 'user', content: [{ type: 'text', text: 'x'.repeat(340000) }] }]
+  await rh.context(hardMsgs)
+  const hardNote = String(hardMsgs.at(-1)?.content?.[0]?.text || '')
+  check('warn: the hard note does not order the model to stop', !/do not start new work/i.test(hardNote), hardNote.slice(0, 160))
+  check('warn: the hard note does not promise a compaction it does not own', !/compaction follows immediately/i.test(hardNote), hardNote.slice(0, 160))
+  check('warn: the hard note keeps the task', /do not drop the task/i.test(hardNote), hardNote.slice(0, 160))
 
   const rs = await rig({ contextLimit: 100000, warnMode: 'system' })
   const c = mk()
@@ -979,7 +990,7 @@ const clone = (v) => JSON.parse(JSON.stringify(v))
   const afterFirst = history.length
   await r.context(history)
   const notes = history.filter((m) => /Automatic note, not from the user/.test(m?.content?.[0]?.text || '')).length
-  check('warn: a persisted note does not stack up', afterFirst === 2 && history.length === 2 && notes === 1, `len=${history.length} notes=${notes}`)
+  check('warn: a persisted note is stripped and not re-added at the same level', afterFirst === 2 && history.length === 1 && notes === 0, `len=${history.length} notes=${notes}`)
   check('warn: the strip is visible in the log', Boolean(r.log().find((l) => l.at === 'note-strip')))
 }
 

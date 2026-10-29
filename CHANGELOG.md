@@ -1,5 +1,31 @@
 ﻿# Changelog
 
+## v1.8.0 – 2026-10-29
+
+Thresholds use the provider's number, and a pressure note can no longer freeze a session.
+
+### Fixed
+
+- **A 68%-full session was told it was 98% full and stopped working.** Live: provider reported
+  `input 2 042 + cache.read 207 104 = 209 146` for the turn, while the plugin computed
+  `used 303 422 / ratio 0.979` from `estimate × cal` — the estimate ran ~24% high on that
+  tool-heavy transcript and `cal` was still the default 1.18 because calibration never took a
+  sample in that session. The hard note then said `Do not start new work in this turn. Compaction
+  follows immediately`, the model repeated it back and refused to start work. The plugin now reads
+  the last completed step's real `input + cache.read` after every user prompt and uses it as the
+  base, adding only the tail that arrived since; the estimate remains the fallback.
+- **The hard note ordered a stop the plugin cannot justify.** `Do not start new work in this turn`
+  and `Compaction follows immediately` are gone. The note asks for a clean finish and for the task,
+  paths, decisions and next step to survive a summary.
+- **Notes repeated on every request.** One note per level, plus another only when the ratio rises by
+  two points; the level resets below the warn threshold.
+
+### Tests
+
+145 assertions (was 142): a real sample wins over the calibrated estimate; the note is not repeated
+at the same level; a persisted note is stripped and not re-added; the hard note contains no stop
+order and no compaction promise.
+
 ## v1.7.2 – 2026-10-28
 
 No shared goal file at all: one per chat, nothing else.
